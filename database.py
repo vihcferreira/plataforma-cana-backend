@@ -4,7 +4,8 @@ from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 
 # URL de conexao com as credenciais do seu docker-compose.yml
-DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management"
+DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
+
 
 engine = create_engine(
     DATABASE_URL,
@@ -48,11 +49,7 @@ class AppUserModel(Base):
     id_user = Column(Integer, primary_key=True, index=True, autoincrement=True)
     name_user = Column(String(255), nullable=False)
     email_user = Column(String(255), unique=True, index=True, nullable=False)
-    role_user = Column(
-        Enum("Administrador", "Responsável Técnico", "Gestor Ambiental", "Operador", "Visualizador"),
-        nullable=False,
-        default="Operador"
-    )
+    role_user = Column(String(255), nullable=False, default="Operador")
     responsible_point_user = Column(String(255), nullable=False)
     status_user = Column(
         Enum("active", "inactive"),

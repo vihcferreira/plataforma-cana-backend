@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -39,3 +39,26 @@ class OccurrenceModel(Base):
     status_occurrence = Column(String(50), nullable=False, default="analise")
     risk_occurrence = Column(String(50), nullable=False, default="medio")
     datetime_occurrence_creation = Column(DateTime, default=datetime.utcnow)
+
+# ==========================================
+# MODELO SQLALCHEMY DA TABELA APP_USER
+# ==========================================
+class AppUserModel(Base):
+    __tablename__ = "App_User"
+    id_user = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    name_user = Column(String(255), nullable=False)
+    email_user = Column(String(255), unique=True, index=True, nullable=False)
+    role_user = Column(
+        Enum("Administrador", "Responsável Técnico", "Gestor Ambiental", "Operador", "Visualizador"),
+        nullable=False,
+        default="Operador"
+    )
+    responsible_point_user = Column(String(255), nullable=False)
+    status_user = Column(
+        Enum("active", "inactive"),
+        nullable=False,
+        default="active"
+    )
+    last_access_datetime = Column(DateTime, nullable=True)
+    datetime_user_creation = Column(DateTime, default=datetime.utcnow)
+    

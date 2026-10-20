@@ -38,8 +38,10 @@ class OcorrenciaBase(BaseModel):
     status_occurrence: str = "analise"
     risk_occurrence: str = "medio"
     code_occurrence: Optional[str] = None
+
 class OcorrenciaCriar(OcorrenciaBase):
     pass
+
 class OcorrenciaAtualizar(BaseModel):
     title_occurrence: Optional[str] = None
     location_occurrence: Optional[str] = None
@@ -47,8 +49,39 @@ class OcorrenciaAtualizar(BaseModel):
     metrics_occurrence: Optional[str] = None
     status_occurrence: Optional[str] = None
     risk_occurrence: Optional[str] = None
+
 class OcorrenciaResposta(OcorrenciaBase):
     id_occurrence: int
     datetime_occurrence_creation: Optional[datetime] = None
+    
     class Config:
         orm_mode = True  # Permite serializar o modelo SQLAlchemy diretamente
+
+# ==========================================
+# SCHEMAS DE USUÁRIO
+# ==========================================
+class UserBase(BaseModel):
+    name_user: str
+    email_user: str
+    role_user: str = 'Operador'
+    responsible_point_user: str
+    status_user: str = 'active'
+
+class UserCriar(UserBase):
+    pass
+
+class UserAtualizar(BaseModel):
+    name_user: Optional[str] = None
+    email_user: Optional[str] = None
+    role_user: Optional[str] = None
+    responsible_point_user: Optional[str] = None
+    status_user: Optional[str] = None
+
+class UserResposta(UserBase):
+    id_user: int
+    last_access_datetime: Optional[datetime] = None
+    datetime_user_creation: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+

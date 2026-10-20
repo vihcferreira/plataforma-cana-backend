@@ -5,8 +5,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import secrets
 import logging
 
-# Agora os arquivos existem, podemos importar todos!
-from routers import tarefas, ia, dashboard, usuarios
+# 1. Importações dos routers
+from routers import tarefas, ia, dashboard, usuarios, ocorrencias
 
 # ==========================================
 # 0. CONFIGURAÇÃO DE LOGS
@@ -14,7 +14,7 @@ from routers import tarefas, ia, dashboard, usuarios
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="API Modularizada (Tarefas, IA, CSRF e CORS)", version="2.0.0")
+app = FastAPI(title="API Plataforma Cana", version="2.0.0")
 
 # ==========================================
 # 1. LIBERAÇÃO DO CORS
@@ -24,8 +24,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
+        "http://localhost:5500",  # Porta padrão do Live Server do VS Code
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "http://127.0.0.1:5500",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -37,7 +39,8 @@ app.add_middleware(
 # ==========================================
 class ProtecaoCSRF(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/prever-qualidade-agua" and request.method == "POST":
+        # Ignora CSRF para IA e para a rota de ocorrências (para facilitar requisições da API)
+        if request.url.path == "/prever-qualidade-agua" or request.url.path.startswith("/ocorrencias"):
             return await call_next(request)
 
         cookie_token = request.cookies.get("XSRF-TOKEN")
@@ -66,3 +69,4 @@ app.include_router(tarefas.router, prefix="/tarefas")
 app.include_router(ia.router)
 app.include_router(dashboard.router)
 app.include_router(usuarios.router)
+app.include_router(ocorrencias.router, prefix="/ocorrencias")  # <--- Registrado aqui no final!

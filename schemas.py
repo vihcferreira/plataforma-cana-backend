@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
+from datetime import datetime
 
 # ==========================================
 # ESQUEMAS / CONTRATOS (Pydantic)
@@ -25,3 +26,29 @@ class DadosAgua(BaseModel):
     temperatura_c: float = Field(..., json_schema_extra={"example": 25.0}, description="Temperatura em graus Celsius")
     dbo_mgl: float = Field(..., json_schema_extra={"example": 10.0}, description="Demanda Biológica de Oxigênio")
     turbidez_ntu: float = Field(..., json_schema_extra={"example": 15.0}, description="Nível de Turbidez")
+
+# ==========================================
+# SCHEMAS DE OCORRÊNCIA
+# ==========================================
+class OcorrenciaBase(BaseModel):
+    title_occurrence: str
+    location_occurrence: str
+    responsible_occurrence: str
+    metrics_occurrence: str
+    status_occurrence: str = "analise"
+    risk_occurrence: str = "medio"
+    code_occurrence: Optional[str] = None
+class OcorrenciaCriar(OcorrenciaBase):
+    pass
+class OcorrenciaAtualizar(BaseModel):
+    title_occurrence: Optional[str] = None
+    location_occurrence: Optional[str] = None
+    responsible_occurrence: Optional[str] = None
+    metrics_occurrence: Optional[str] = None
+    status_occurrence: Optional[str] = None
+    risk_occurrence: Optional[str] = None
+class OcorrenciaResposta(OcorrenciaBase):
+    id_occurrence: int
+    datetime_occurrence_creation: Optional[datetime] = None
+    class Config:
+        orm_mode = True  # Permite serializar o modelo SQLAlchemy diretamente

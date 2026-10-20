@@ -1,2 +1,13 @@
 docker-compose.yml
 init/init.sql
+
+# Python cache e arquivos temporários
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Ambientes virtuais
+venv/
+.venv/
+env/

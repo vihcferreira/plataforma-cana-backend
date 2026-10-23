@@ -315,3 +315,43 @@ Crie o diretório `init/` e dentro dele o arquivo `init.sql` contendo o script D
 | **Senha** | `password` |
 | **Root Password** | `rootpassword` |
 
+---
+
+## 🚀 Inicialização do Servidor Backend (FastAPI)
+
+Após subir o container do MySQL, siga as etapas abaixo para configurar o ambiente e executar a API.
+
+### 1. Criar e Ativar o Ambiente Virtual (venv)
+
+* **No Windows (PowerShell):**
+  ```powershell
+  python -m venv venv
+  .\venv\Scripts\Activate.ps1
+  ```
+
+* **No Linux / macOS:**
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+
+### 2. Instalar as Dependências
+
+Com o ambiente virtual ativado:
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql cryptography pydantic httpx
+```
+
+### 3. Iniciar o Servidor
+
+Execute o Uvicorn com recarregamento automático (`--reload`):
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+O servidor estará disponível em:
+* **API Base:** [http://localhost:8000](http://localhost:8000)
+* **Documentação Swagger (Swagger UI):** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Documentação Alternativa (ReDoc):** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+

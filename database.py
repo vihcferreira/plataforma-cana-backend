@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -58,4 +58,24 @@ class AppUserModel(Base):
     )
     last_access_datetime = Column(DateTime, nullable=True)
     datetime_user_creation = Column(DateTime, default=datetime.utcnow)
+
+# ==========================================
+# MODELO SQLALCHEMY DA TABELA MAP_POINT
+# ==========================================
+class MapPointModel(Base):
+    __tablename__ = "Map_Point"
+    id_map_point = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    code_map_point = Column(String(10), unique=True, index=True, nullable=False)
+    name_map_point = Column(String(255), nullable=False)
+    grid_coordinate_map_point = Column(String(10), nullable=True)
+    geo_coordinate_map_point = Column(String(50), nullable=True)
+    pos_x_map_point = Column(Float, nullable=False)
+    pos_y_map_point = Column(Float, nullable=False)
+    ph_map_point = Column(Float, nullable=False)
+    turbidity_map_point = Column(Float, nullable=False)
+    contaminant_map_point = Column(Float, nullable=False)
+    risk_map_point = Column(String(50), nullable=False)
+    datetime_map_point_creation = Column(DateTime, default=datetime.utcnow)
+    datetime_map_point_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
     

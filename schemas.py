@@ -85,3 +85,40 @@ class UserResposta(UserBase):
     class Config:
         orm_mode = True
 
+# ==========================================
+# SCHEMAS DE MAPA
+# ==========================================
+class MapBase(BaseModel):
+    code_map_point: str
+    name_map_point: str
+    grid_coordinate_map_point: Optional[str] = None
+    geo_coordinate_map_point: Optional[str] = None
+    pos_x_map_point: float
+    pos_y_map_point: float
+    ph_map_point: float = 7.0
+    turbidity_map_point: float = 20.0
+    contaminant_map_point: float = 0.0
+    risk_map_point: str = "low"
+
+class MapCriar(MapBase):
+    pass
+
+class MapAtualizar(BaseModel):
+    code_map_point: Optional[str] = None
+    name_map_point: Optional[str] = None
+    grid_coordinate_map_point: Optional[str] = None
+    geo_coordinate_map_point: Optional[str] = None
+    pos_x_map_point: Optional[float] = None
+    pos_y_map_point: Optional[float] = None
+    ph_map_point: Optional[float] = None
+    turbidity_map_point: Optional[float] = None
+    contaminant_map_point: Optional[float] = None
+    risk_map_point: Optional[str] = None
+
+class MapResposta(MapBase):
+    id_map_point: int
+    datetime_map_point_creation: Optional[datetime] = None
+    datetime_map_point_update: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True

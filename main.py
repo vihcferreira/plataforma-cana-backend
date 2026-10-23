@@ -6,7 +6,7 @@ import secrets
 import logging
 
 # 1. Importações dos routers
-from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user
+from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa
 
 # ==========================================
 # 0. CONFIGURAÇÃO DE LOGS
@@ -40,7 +40,7 @@ app.add_middleware(
 class ProtecaoCSRF(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Ignora CSRF para IA e para a rota de ocorrências (para facilitar requisições da API)
-        if request.url.path == "/prever-qualidade-agua" or request.url.path.startswith("/ocorrencias") or request.url.path.startswith("/users"):
+        if request.url.path == "/prever-qualidade-agua" or request.url.path.startswith("/ocorrencias") or request.url.path.startswith("/users") or request.url.path.startswith("/mapa"):
             return await call_next(request)
 
         cookie_token = request.cookies.get("XSRF-TOKEN")
@@ -71,4 +71,5 @@ app.include_router(dashboard.router)
 app.include_router(usuarios.router)
 app.include_router(ocorrencias.router, prefix="/ocorrencias") 
 app.include_router(app_user.router, prefix="/users")
+app.include_router(mapa.router, prefix="/mapa")
 

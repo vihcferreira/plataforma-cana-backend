@@ -339,7 +339,7 @@ Após subir o container do MySQL, siga as etapas abaixo para configurar o ambien
 
 Com o ambiente virtual ativado:
 ```bash
-pip install fastapi uvicorn sqlalchemy pymysql cryptography pydantic httpx
+pip install -r requirements.txt
 ```
 
 ### 3. Iniciar o Servidor

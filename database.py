@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Date, Enum, Float, Text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Date, Enum, Float, Text, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, date
@@ -75,9 +75,26 @@ class MapPointModel(Base):
     ph_map_point = Column(Float, nullable=False)
     turbidity_map_point = Column(Float, nullable=False)
     contaminant_map_point = Column(Float, nullable=False)
+    volume_map_point = Column(Float, nullable=False, default=4000.0)
     risk_map_point = Column(String(50), nullable=False)
     datetime_map_point_creation = Column(DateTime, default=datetime.utcnow)
     datetime_map_point_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# ==========================================
+# MODELO SQLALCHEMY DE HISTÓRICO DE MEDIÇÕES DOS PONTOS (Para preservar análise nos gráficos)
+# ==========================================
+class MapMeasurementHistoryModel(Base):
+    __tablename__ = "Map_Measurement_History"
+
+    id_measurement = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    code_map_point = Column(String(10), nullable=False, index=True)
+    name_map_point = Column(String(255), nullable=False)
+    ph = Column(Float, nullable=False)
+    turbidity = Column(Float, nullable=False)
+    contaminant = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False, default=4000.0)
+    risk = Column(String(50), nullable=False, default="low")
+    recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 # ==========================================
 # MODELO SQLALCHEMY DA TABELA HISTORY_EVENT
@@ -110,6 +127,15 @@ class AIDailyAnalysisModel(Base):
 def init_db():
     try:
         Base.metadata.create_all(bind=engine)
+        # Executa migration defensiva para adicionar a coluna volume_map_point se a tabela Map_Point já existir
+        with engine.connect() as conn:
+            try:
+                conn.execute(
+                    text("ALTER TABLE Map_Point ADD COLUMN volume_map_point FLOAT NOT NULL DEFAULT 4000.0")
+                )
+                conn.commit()
+            except Exception:
+                pass
     except Exception as e:
         pass
 

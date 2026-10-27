@@ -98,6 +98,7 @@ class MapBase(BaseModel):
     ph_map_point: float = 7.0
     turbidity_map_point: float = 20.0
     contaminant_map_point: float = 0.0
+    volume_map_point: float = 4000.0
     risk_map_point: str = "low"
 
 class MapCriar(MapBase):
@@ -113,6 +114,7 @@ class MapAtualizar(BaseModel):
     ph_map_point: Optional[float] = None
     turbidity_map_point: Optional[float] = None
     contaminant_map_point: Optional[float] = None
+    volume_map_point: Optional[float] = None
     risk_map_point: Optional[str] = None
 
 class MapResposta(MapBase):
@@ -122,6 +124,21 @@ class MapResposta(MapBase):
 
     class Config:
         orm_mode = True
+
+class MapMeasurementHistoryResposta(BaseModel):
+    id_measurement: int
+    code_map_point: str
+    name_map_point: str
+    ph: float
+    turbidity: float
+    contaminant: float
+    volume: float
+    risk: str
+    recorded_at: datetime
+
+    class Config:
+        orm_mode = True
+
 
 # ==========================================
 # SCHEMAS DE HISTÓRICO

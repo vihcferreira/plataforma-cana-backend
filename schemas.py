@@ -122,3 +122,27 @@ class MapResposta(MapBase):
 
     class Config:
         orm_mode = True
+
+# ==========================================
+# SCHEMAS DE HISTÓRICO
+# ==========================================
+class HistoryEventBase(BaseModel):
+    event_type: str  # 'medicao', 'providencia', 'ocorrencia', 'alerta'
+    event_label: str
+    event_point: str
+    event_description: str
+    event_severity: str = "normal"  # 'normal', 'medio', 'critico'
+    id_reference: Optional[int] = None
+    reference_type: Optional[str] = None
+    created_by: Optional[str] = None
+
+class HistoryEventCriar(HistoryEventBase):
+    pass
+
+class HistoryEventResposta(HistoryEventBase):
+    id_history: int
+    datetime_history: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+

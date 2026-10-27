@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, Float
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, Float, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -10,7 +10,8 @@ DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?ch
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # Verifica se a conexao ainda esta ativa antes de usar
-    pool_recycle=3600
+    pool_recycle=3600,
+    connect_args={"connect_timeout": 3}
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -77,5 +78,27 @@ class MapPointModel(Base):
     risk_map_point = Column(String(50), nullable=False)
     datetime_map_point_creation = Column(DateTime, default=datetime.utcnow)
     datetime_map_point_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    
+
+# ==========================================
+# MODELO SQLALCHEMY DA TABELA HISTORY_EVENT
+# ==========================================
+class HistoryEventModel(Base):
+    __tablename__ = "History_Event"
+
+    id_history = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    event_type = Column(String(50), nullable=False, index=True)  # 'medicao', 'providencia', 'ocorrencia', 'alerta'
+    event_label = Column(String(100), nullable=False)
+    event_point = Column(String(255), nullable=False)
+    event_description = Column(Text, nullable=False)
+    event_severity = Column(String(50), nullable=False, default="normal")  # 'normal', 'medio', 'critico'
+    id_reference = Column(Integer, nullable=True)
+    reference_type = Column(String(50), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    datetime_history = Column(DateTime, default=datetime.utcnow, index=True)
+
+def init_db():
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        pass
+

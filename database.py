@@ -1,7 +1,7 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, Float, Text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Date, Enum, Float, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, date
 
 # URL de conexao com as credenciais do seu docker-compose.yml
 DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
@@ -95,6 +95,17 @@ class HistoryEventModel(Base):
     reference_type = Column(String(50), nullable=True)
     created_by = Column(String(255), nullable=True)
     datetime_history = Column(DateTime, default=datetime.utcnow, index=True)
+
+# ==========================================
+# MODELO SQLALCHEMY DA TABELA AI_DAILY_ANALYSIS
+# ==========================================
+class AIDailyAnalysisModel(Base):
+    __tablename__ = "AI_Daily_Analysis"
+
+    id_analysis = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    analysis_date = Column(Date, unique=True, index=True, nullable=False)
+    analysis_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 def init_db():
     try:

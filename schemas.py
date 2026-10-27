@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 # ==========================================
@@ -145,4 +145,38 @@ class HistoryEventResposta(HistoryEventBase):
 
     class Config:
         orm_mode = True
+
+# ==========================================
+# SCHEMAS DE INTELIGÊNCIA ARTIFICIAL (GROQ)
+# ==========================================
+class AISimulationRequest(BaseModel):
+    ph: float
+    turbidity: float
+    volume: float
+    contaminants: float
+    rain: bool = False
+    calculated_score: Optional[int] = None
+    calculated_risk: Optional[str] = None
+
+class AISimulationResponse(BaseModel):
+    risk_level: str               # "Baixo", "Médio" ou "Crítico"
+    risk_score_evaluation: str   # Resumo da avaliação numérica
+    summary: str                 # Análise técnica resumida
+    technical_considerations: str # Considerações técnicas no contexto sucroalcooleiro
+    recommendations: List[str]   # Lista de ações recomendadas
+    alerts_suggested: List[str]  # Alertas sugeridos pela IA
+    model_used: str
+
+class AIDailyAnalysisResponse(BaseModel):
+    analysis_date: str
+    analysis_text: str
+    stress_probability: str
+    confidence_index: str
+    variables: List[dict]
+    recommended_action_title: str
+    recommended_action_desc: str
+    from_cache: bool = False
+    generated_at: str
+    model_used: str
+
 

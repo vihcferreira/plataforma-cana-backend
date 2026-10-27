@@ -11,3 +11,8 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# Credenciais e variáveis de ambiente
+.env
+.env.local
+.env.*.local

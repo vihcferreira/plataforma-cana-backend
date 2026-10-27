@@ -46,6 +46,21 @@ def listar_historico_medicoes(dias: Optional[int] = None, db: Session = Depends(
 
     return registros
 
+from pydantic import BaseModel
+
+class TelemetriaToggleRequest(BaseModel):
+    active: bool
+
+from services import telemetry_service
+
+@router.get("/telemetria/status", summary="Obter status do serviço de telemetria autônoma")
+def obter_status_telemetria_endpoint():
+    return telemetry_service.obter_status_telemetria()
+
+@router.post("/telemetria/toggle", summary="Ativar ou desativar o serviço de telemetria autônoma")
+def toggle_telemetria_endpoint(dados: TelemetriaToggleRequest):
+    return telemetry_service.definir_status_telemetria(dados.active)
+
 @router.get("/{id_map}", response_model=MapResposta, summary="Buscar ponto do mapa por ID")
 def buscar_mapa(id_map: int, db: Session = Depends(get_db)):
     mapa = db.query(MapPointModel).filter(MapPointModel.id_map_point == id_map).first()

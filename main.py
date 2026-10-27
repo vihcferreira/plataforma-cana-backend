@@ -86,12 +86,15 @@ app.include_router(ia_groq.router, prefix="/ia")
 # 4. EVENTOS DE CICLO DE VIDA (STARTUP)
 # ==========================================
 import asyncio
+from services import telemetry_service
 
 @app.on_event("startup")
 async def ao_iniciar_aplicacao():
     logger.info("🚀 Inicializando aplicação FastAPI Plataforma Cana...")
     # Dispara a rotina diária em background para rodar todo dia às 7h da manhã
     asyncio.create_task(ia_groq.rotina_agendamento_analise_7h())
+    # Dispara o serviço contínuo de telemetria autônoma em background
+    asyncio.create_task(telemetry_service.servico_telemetria_tempo_real())
 
 
 

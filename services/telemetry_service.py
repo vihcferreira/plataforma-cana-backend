@@ -1,9 +1,17 @@
 import asyncio
 import random
 import logging
+import json
 from datetime import datetime
 
-from database import SessionLocal, MapPointModel, MapMeasurementHistoryModel, HistoryEventModel
+from database import (
+    SessionLocal, 
+    MapPointModel, 
+    MapMeasurementHistoryModel, 
+    HistoryEventModel,
+    OccurrenceModel,
+    AlertModel
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +84,8 @@ async def servico_telemetria_tempo_real():
                 contam_noise = (random.random() - 0.5) * 0.12
                 ponto.contaminant_map_point = round(min(4.0, max(0.1, ponto.contaminant_map_point + contam_pull + contam_noise)), 1)
 
-                # Ocorrência transitória rara (~5% de probabilidade de pico crítico)
-                eh_pico_anomalo = random.random() < 0.05
+                # Ocorrência transitória rara (~2% de probabilidade de pico crítico)
+                eh_pico_anomalo = random.random() < 0.02
                 if eh_pico_anomalo:
                     tipo_anomalia = random.randint(0, 3)
                     if tipo_anomalia == 0:
@@ -104,7 +112,7 @@ async def servico_telemetria_tempo_real():
                 ])
 
                 # Classificação de Risco
-                if crit_count >= 2:
+                if crit_count >= 1:
                     novo_risco = "critical"
                 elif crit_count == 1 or warn_count >= 2:
                     novo_risco = "medium"
@@ -128,8 +136,8 @@ async def servico_telemetria_tempo_real():
                 )
                 db.add(hist_medicao)
 
-                # ATUALIZAÇÃO DA TIMELINE DO HISTÓRICO SE HOUVER ATUALIZAÇÃO CRÍTICA
-                if novo_risco == "critical" or crit_count > 0:
+                # GERAÇÃO DE OCORRÊNCIA, ALERTA E HISTÓRICO SE O RISCO FOR CRÍTICO
+                if novo_risco == "critical":
                     detalhes = []
                     if ph_crit:
                         detalhes.append(f"pH {ponto.ph_map_point:.1f}")
@@ -140,16 +148,78 @@ async def servico_telemetria_tempo_real():
                     if vol_crit:
                         detalhes.append(f"Volume {ponto.volume_map_point:.0f} m³")
 
-                    descricao_alerta = (
-                        f"Telemetria detectou parâmetros críticos no ponto {ponto.name_map_point}: "
-                        f"{', '.join(detalhes)}. Classificado com Risco Crítico."
+                    if not detalhes:
+                        detalhes.append("Parâmetros anômalos detectados")
+
+                    # 1. Cria a Ocorrência formal no banco
+                    codigo_ocr = f"OCR-{random.randint(1000, 9999)}"
+                    metricas_formatadas = (
+                        f"PH: {ponto.ph_map_point:.1f} | "
+                        f"TUR: {ponto.turbidity_map_point:.0f} NTU | "
+                        f"CONT: {ponto.contaminant_map_point:.1f} mg/L | "
+                        f"VOL: {ponto.volume_map_point:.0f} m³"
                     )
 
+                    nova_ocorrencia = OccurrenceModel(
+                        code_occurrence=codigo_ocr,
+                        title_occurrence=f"Nível Crítico — {ponto.name_map_point}",
+                        location_occurrence=f"{ponto.code_map_point} - {ponto.name_map_point}",
+                        responsible_occurrence="Eng. Carlos Lima",
+                        metrics_occurrence=metricas_formatadas,
+                        status_occurrence="analise",
+                        risk_occurrence="critico",
+                        datetime_occurrence_creation=agora_utc
+                    )
+                    db.add(nova_ocorrencia)
+                    db.flush()  # Garante geração de nova_ocorrencia.id_occurrence para o alerta
+
+                    # 2. Recomendação operacional contextualizada
+                    if contam_crit:
+                        recomendacao = "Interromper descarte de efluentes imediatamente e acionar equipe de campo para estancar vazamento."
+                    elif ph_crit:
+                        recomendacao = "Ajustar dosagem de neutralização química e calibrar sondas de monitoramento."
+                    elif turb_crit:
+                        recomendacao = "Acionar bacias de decantação suplementares e inspecionar filtros de retenção."
+                    else:
+                        recomendacao = "Inspecionar comportas de vazão e reforçar barreiras de contenção operacional."
+
+                    mensagem_critica = (
+                        f"Múltiplos parâmetros acima do limite aceitável simultaneamente: {', '.join(detalhes)}"
+                        if len(detalhes) > 1 else
+                        f"Parâmetro anômalo com risco crítico detectado: {detalhes[0]}"
+                    )
+
+                    params_chips = [
+                        f"pH: {ponto.ph_map_point:.1f}",
+                        f"Turbidez: {ponto.turbidity_map_point:.0f} NTU",
+                        f"Contaminantes: {ponto.contaminant_map_point:.1f} mg/L",
+                        f"Volume: {ponto.volume_map_point:.0f} m³"
+                    ]
+
+                    # 3. Cria o Alerta vinculado para a tela de Alertas e Notificações
+                    codigo_alerta = f"AL-{random.randint(100, 999)}"
+                    novo_alerta = AlertModel(
+                        code_alert=codigo_alerta,
+                        point_name=ponto.name_map_point,
+                        severity="critical",
+                        status="active",
+                        message=mensagem_critica,
+                        params_json=json.dumps(params_chips),
+                        recommendation=recomendacao,
+                        responsible="Eng. Carlos Lima",
+                        id_occurrence=nova_ocorrencia.id_occurrence,
+                        code_occurrence=nova_ocorrencia.code_occurrence,
+                        is_viewed=0,
+                        datetime_alert=agora_utc
+                    )
+                    db.add(novo_alerta)
+
+                    # 4. Registra evento na timeline do Histórico
                     evento_alerta = HistoryEventModel(
                         event_type="alerta",
                         event_label="Alerta Crítico de Qualidade",
                         event_point=f"{ponto.code_map_point} - {ponto.name_map_point}",
-                        event_description=descricao_alerta,
+                        event_description=f"Telemetria detectou {', '.join(detalhes)}. Ocorrência #{codigo_ocr} e Alerta #{codigo_alerta} gerados.",
                         event_severity="critico",
                         id_reference=ponto.id_map_point,
                         reference_type="map_point",
@@ -157,7 +227,9 @@ async def servico_telemetria_tempo_real():
                         datetime_history=agora_utc
                     )
                     db.add(evento_alerta)
-                    logger.warning(f"🚨 [Telemetria] Alerta Crítico registrado na timeline do Histórico para {ponto.code_map_point}")
+                    logger.warning(
+                        f"🚨 [Telemetria] Alerta Crítico {codigo_alerta} e Ocorrência {codigo_ocr} gerados para {ponto.name_map_point}"
+                    )
 
                 db.commit()
 

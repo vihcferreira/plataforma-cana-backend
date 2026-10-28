@@ -124,6 +124,26 @@ class AIDailyAnalysisModel(Base):
     analysis_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# ==========================================
+# MODELO SQLALCHEMY DA TABELA ALERT
+# ==========================================
+class AlertModel(Base):
+    __tablename__ = "Alert"
+
+    id_alert = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    code_alert = Column(String(20), unique=True, index=True, nullable=False)
+    point_name = Column(String(255), nullable=False)
+    severity = Column(String(50), nullable=False, default="critical")  # 'critical', 'medium', 'preventive', 'resolved'
+    status = Column(String(50), nullable=False, default="active")      # 'active', 'resolved'
+    message = Column(Text, nullable=False)
+    params_json = Column(Text, nullable=False)                         # JSON array de strings: '["pH: 9.3", "Turbidez: 68 NTU"]'
+    recommendation = Column(Text, nullable=False)
+    responsible = Column(String(255), nullable=False, default="Eng. Carlos Lima")
+    id_occurrence = Column(Integer, nullable=True)                     # Referência à ocorrência criada
+    code_occurrence = Column(String(20), nullable=True)                # Código da ocorrência (ex: OCR-1082)
+    is_viewed = Column(Integer, default=0)                             # 0 = não visualizado, 1 = visualizado
+    datetime_alert = Column(DateTime, default=datetime.utcnow, index=True)
+
 def init_db():
     try:
         Base.metadata.create_all(bind=engine)
@@ -138,4 +158,5 @@ def init_db():
                 pass
     except Exception as e:
         pass
+
 

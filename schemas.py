@@ -196,4 +196,38 @@ class AIDailyAnalysisResponse(BaseModel):
     generated_at: str
     model_used: str
 
+# ==========================================
+# SCHEMAS PARA ALERTAS (TELA DE ALERTAS & NOTIFICAÇÕES)
+# ==========================================
+class AlertCriar(BaseModel):
+    code_alert: Optional[str] = None
+    point_name: str
+    severity: str = "critical"
+    status: str = "active"
+    message: str
+    params: List[str] = []
+    recommendation: str
+    responsible: str = "Eng. Carlos Lima"
+    id_occurrence: Optional[int] = None
+    code_occurrence: Optional[str] = None
+
+class AlertResposta(BaseModel):
+    id_alert: int
+    code_alert: str
+    point_name: str
+    severity: str
+    status: str
+    message: str
+    params: List[str] = []
+    recommendation: str
+    responsible: str
+    id_occurrence: Optional[int] = None
+    code_occurrence: Optional[str] = None
+    is_viewed: int
+    datetime_alert: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 

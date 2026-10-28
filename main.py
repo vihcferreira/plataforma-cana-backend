@@ -6,7 +6,8 @@ import secrets
 import logging
 
 # 1. Importações dos routers
-from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa, historico, ia_groq
+from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa, historico, ia_groq, alertas
+from database import init_db
 
 # ==========================================
 # 0. CONFIGURAÇÃO DE LOGS
@@ -39,7 +40,7 @@ app.add_middleware(
 # ==========================================
 class ProtecaoCSRF(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Ignora CSRF para IA, ocorrências, usuários, mapa e histórico
+        # Ignora CSRF para IA, ocorrências, usuários, mapa, histórico e alertas
         if (
             request.url.path == "/prever-qualidade-agua"
             or request.url.path.startswith("/ocorrencias")
@@ -47,6 +48,7 @@ class ProtecaoCSRF(BaseHTTPMiddleware):
             or request.url.path.startswith("/mapa")
             or request.url.path.startswith("/historico")
             or request.url.path.startswith("/ia")
+            or request.url.path.startswith("/alertas")
         ):
             return await call_next(request)
 
@@ -81,6 +83,7 @@ app.include_router(app_user.router, prefix="/users")
 app.include_router(mapa.router, prefix="/mapa")
 app.include_router(historico.router, prefix="/historico")
 app.include_router(ia_groq.router, prefix="/ia")
+app.include_router(alertas.router, prefix="/alertas")
 
 # ==========================================
 # 4. EVENTOS DE CICLO DE VIDA (STARTUP)
@@ -91,6 +94,7 @@ from services import telemetry_service
 @app.on_event("startup")
 async def ao_iniciar_aplicacao():
     logger.info("🚀 Inicializando aplicação FastAPI Plataforma Cana...")
+    init_db()
     # Dispara a rotina diária em background para rodar todo dia às 7h da manhã
     asyncio.create_task(ia_groq.rotina_agendamento_analise_7h())
     # Dispara o serviço contínuo de telemetria autônoma em background

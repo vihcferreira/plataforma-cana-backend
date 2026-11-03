@@ -85,7 +85,7 @@ async def servico_telemetria_tempo_real():
                 ponto.contaminant_map_point = round(min(4.0, max(0.1, ponto.contaminant_map_point + contam_pull + contam_noise)), 1)
 
                 # Ocorrência transitória rara (~2% de probabilidade de pico crítico)
-                eh_pico_anomalo = random.random() < 0.02
+                eh_pico_anomalo = random.random() < 0.07
                 if eh_pico_anomalo:
                     tipo_anomalia = random.randint(0, 3)
                     if tipo_anomalia == 0:
@@ -112,7 +112,7 @@ async def servico_telemetria_tempo_real():
                 ])
 
                 # Classificação de Risco
-                if crit_count >= 1:
+                if crit_count >= 2:
                     novo_risco = "critical"
                 elif crit_count == 1 or warn_count >= 2:
                     novo_risco = "medium"
@@ -164,7 +164,7 @@ async def servico_telemetria_tempo_real():
                         code_occurrence=codigo_ocr,
                         title_occurrence=f"Nível Crítico — {ponto.name_map_point}",
                         location_occurrence=f"{ponto.code_map_point} - {ponto.name_map_point}",
-                        responsible_occurrence="Eng. Carlos Lima",
+                        responsible_occurrence="Responsável Local",
                         metrics_occurrence=metricas_formatadas,
                         status_occurrence="analise",
                         risk_occurrence="critico",
@@ -230,6 +230,14 @@ async def servico_telemetria_tempo_real():
                     logger.warning(
                         f"🚨 [Telemetria] Alerta Crítico {codigo_alerta} e Ocorrência {codigo_ocr} gerados para {ponto.name_map_point}"
                     )
+                    try:
+                        from routers.alertas import _config_notificacoes
+                        if _config_notificacoes.get("email_alerts") and _config_notificacoes.get("user_email"):
+                            logger.info(
+                                f"📧 [Email Alert] Alerta Crítico {codigo_alerta} ({ponto.name_map_point}) disparado para o e-mail: {_config_notificacoes.get('user_email')}"
+                            )
+                    except Exception as err:
+                        logger.debug(f"[Telemetria] Notificação por e-mail: {err}")
 
                 db.commit()
 

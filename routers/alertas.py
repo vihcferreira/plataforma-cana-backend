@@ -90,3 +90,26 @@ def excluir_alerta(id_alert: int, db: Session = Depends(get_db)):
     db.delete(alerta)
     db.commit()
     return None
+
+# Estado global da configuração de notificações de alertas
+_config_notificacoes = {
+    "email_alerts": True,
+    "push_alerts": True,
+    "user_email": ""
+}
+
+@router.get("/config-notificacoes", summary="Obter configurações atuais de notificação")
+def obter_config_notificacoes():
+    return _config_notificacoes
+
+@router.post("/config-notificacoes", summary="Atualizar configurações de notificação")
+def atualizar_config_notificacoes(dados: dict):
+    global _config_notificacoes
+    if "email_alerts" in dados:
+        _config_notificacoes["email_alerts"] = bool(dados["email_alerts"])
+    if "push_alerts" in dados:
+        _config_notificacoes["push_alerts"] = bool(dados["push_alerts"])
+    if "user_email" in dados and dados["user_email"]:
+        _config_notificacoes["user_email"] = str(dados["user_email"])
+    return {"success": True, "config": _config_notificacoes}
+

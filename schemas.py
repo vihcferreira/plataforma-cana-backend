@@ -53,9 +53,9 @@ class OcorrenciaAtualizar(BaseModel):
 class OcorrenciaResposta(OcorrenciaBase):
     id_occurrence: int
     datetime_occurrence_creation: Optional[datetime] = None
-    
+
     class Config:
-        orm_mode = True  # Permite serializar o modelo SQLAlchemy diretamente
+        from_attributes = True  # Permite serializar o modelo SQLAlchemy diretamente
 
 # ==========================================
 # SCHEMAS DE USUÁRIO
@@ -83,7 +83,7 @@ class UserResposta(UserBase):
     datetime_user_creation: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # ==========================================
 # SCHEMAS DE MAPA
@@ -123,7 +123,7 @@ class MapResposta(MapBase):
     datetime_map_point_update: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class MapMeasurementHistoryResposta(BaseModel):
     id_measurement: int
@@ -137,7 +137,7 @@ class MapMeasurementHistoryResposta(BaseModel):
     recorded_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # ==========================================
@@ -161,7 +161,7 @@ class HistoryEventResposta(HistoryEventBase):
     datetime_history: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # ==========================================
 # SCHEMAS DE INTELIGÊNCIA ARTIFICIAL (GROQ)
@@ -207,7 +207,7 @@ class AlertCriar(BaseModel):
     message: str
     params: List[str] = []
     recommendation: str
-    responsible: str = "Eng. Carlos Lima"
+    responsible: str = "Responsável Local"
     id_occurrence: Optional[int] = None
     code_occurrence: Optional[str] = None
 
@@ -228,6 +228,3 @@ class AlertResposta(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-

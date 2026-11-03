@@ -1,6 +1,6 @@
 """
 Router de IA integrada com Groq (Llama 3.3) — Plataforma Cana
-Rotas de Simulação Preditiva e Análise Diária da Plataforma com Cache
+Rotas de Simulação Preditiva e Análise Diária da Plataforma com Cache isolado por Tenant
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 
+from auth_tenant import get_current_tenant
 from database import (
     get_db,
     SessionLocal,
@@ -16,14 +17,13 @@ from database import (
     OccurrenceModel,
     MapPointModel,
     HistoryEventModel,
-    AppUserModel,
     Base,
-    engine
+    engine,
 )
 from schemas import (
     AISimulationRequest,
     AISimulationResponse,
-    AIDailyAnalysisResponse
+    AIDailyAnalysisResponse,
 )
 from services.groq_client import call_groq_chat, SYSTEM_PROMPT, get_groq_credentials
 
@@ -31,61 +31,89 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Inteligência Artificial (Groq)"])
 
-def executar_e_persistir_analise_diaria(db: Session, forcar_atualizacao: bool = False) -> dict:
+
+def executar_e_persistir_analise_diaria(
+    db: Session,
+    tenant_id: str,
+    forcar_atualizacao: bool = False,
+) -> dict:
     """
-    Função síncrona reutilizável que consulta o banco, monta o prompt com os dados consolidados,
-    solicita a análise do Groq e grava/atualiza o registro na tabela AI_Daily_Analysis.
+    Consulta exclusivamente os dados pertencentes ao `tenant_id`, monta o prompt consolidado,
+    solicita a análise do Groq e grava/atualiza o cache diário isolado por `(tenant_id, analysis_date)`.
     """
     hoje = date.today()
     hoje_str = hoje.isoformat()
     _, model = get_groq_credentials()
 
-    # 1. Verifica se já existe cache do dia de hoje no banco
+    # 1. Verifica se já existe cache do dia de hoje no banco para este tenant específico
     try:
-        registro_cache = db.query(AIDailyAnalysisModel).filter(AIDailyAnalysisModel.analysis_date == hoje).first()
+        registro_cache = (
+            db.query(AIDailyAnalysisModel)
+            .filter(
+                AIDailyAnalysisModel.tenant_id == tenant_id,
+                AIDailyAnalysisModel.analysis_date == hoje,
+            )
+            .first()
+        )
         if registro_cache and not forcar_atualizacao:
             dados_salvos = json.loads(registro_cache.analysis_json)
             dados_salvos["from_cache"] = True
             return dados_salvos
-    except Exception as e:
+    except Exception:
         try:
             Base.metadata.create_all(bind=engine)
         except Exception:
             pass
 
-    # 2. Coleta dados reais consolidados da plataforma para contexto
+    # 2. Coleta dados reais consolidados EXCLUSIVOS deste tenant para contexto
     dados_contexto = {
         "ocorrencias_ativas": [],
         "pontos_criticos": [],
         "total_pontos": 0,
-        "ultimos_eventos": []
+        "ultimos_eventos": [],
     }
 
     try:
-        ocorrencias = db.query(OccurrenceModel).all()
+        ocorrencias = (
+            db.query(OccurrenceModel)
+            .filter(OccurrenceModel.tenant_id == tenant_id)
+            .all()
+        )
         dados_contexto["ocorrencias_ativas"] = [
             f"{o.code_occurrence or 'OCR'}: {o.title_occurrence} ({o.location_occurrence}, risco {o.risk_occurrence}, status {o.status_occurrence})"
-            for o in ocorrencias if o.status_occurrence != "encerradas"
+            for o in ocorrencias
+            if o.status_occurrence != "encerradas"
         ]
 
-        pontos = db.query(MapPointModel).all()
+        pontos = (
+            db.query(MapPointModel)
+            .filter(MapPointModel.tenant_id == tenant_id)
+            .all()
+        )
         dados_contexto["total_pontos"] = len(pontos)
         dados_contexto["pontos_criticos"] = [
             f"{p.name_map_point} (pH {p.ph_map_point}, Turbidez {p.turbidity_map_point} NTU, Risco {p.risk_map_point})"
-            for p in pontos if p.risk_map_point in ["critical", "medium"]
+            for p in pontos
+            if p.risk_map_point in ["critical", "medium"]
         ]
 
-        eventos = db.query(HistoryEventModel).order_by(HistoryEventModel.datetime_history.desc()).limit(10).all()
+        eventos = (
+            db.query(HistoryEventModel)
+            .filter(HistoryEventModel.tenant_id == tenant_id)
+            .order_by(HistoryEventModel.datetime_history.desc())
+            .limit(10)
+            .all()
+        )
         dados_contexto["ultimos_eventos"] = [
             f"[{e.event_type.upper()}] {e.event_point}: {e.event_description}"
             for e in eventos
         ]
     except Exception as db_err:
-        logger.warning(f"Aviso ao consultar dados consolidados para IA: {db_err}")
+        logger.warning(f"Aviso ao consultar dados consolidados para IA do tenant {tenant_id[:8]}: {db_err}")
 
     prompt_analise = f"""Realize a ANÁLISE GERAL DIÁRIA da plataforma de tratamento de água e efluentes canavieiros para a data de {hoje_str}.
-Contexto real consolidado da plataforma neste momento:
-- Total de pontos de monitoramento: {dados_contexto['total_pontos']}
+Contexto real consolidado da unidade deste usuário neste momento:
+- Total de pontos de monitoramento cadastrados: {dados_contexto['total_pontos']}
 - Pontos com atenção ou críticos: {json.dumps(dados_contexto['pontos_criticos'], ensure_ascii=False)}
 - Ocorrências ativas em andamento: {json.dumps(dados_contexto['ocorrencias_ativas'], ensure_ascii=False)}
 - Últimos eventos registrados no histórico: {json.dumps(dados_contexto['ultimos_eventos'], ensure_ascii=False)}
@@ -122,7 +150,7 @@ Gere um JSON rigoroso com a seguinte estrutura para preencher o card de análise
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt_analise}
+        {"role": "user", "content": prompt_analise},
     ]
 
     resultado = call_groq_chat(messages, temperature=0.2)
@@ -138,18 +166,26 @@ Gere um JSON rigoroso com a seguinte estrutura para preencher o card de análise
         "recommended_action_desc": resultado.get("recommended_action_desc", "Manter rotina padrão de inspeção."),
         "from_cache": False,
         "generated_at": agora_iso,
-        "model_used": model
+        "model_used": model,
     }
 
-    # 3. Salva no banco de dados para reutilização nas próximas requisições do mesmo dia
+    # 3. Salva no banco de dados vinculado exclusivamente ao tenant_id
     try:
-        registro_existente = db.query(AIDailyAnalysisModel).filter(AIDailyAnalysisModel.analysis_date == hoje).first()
+        registro_existente = (
+            db.query(AIDailyAnalysisModel)
+            .filter(
+                AIDailyAnalysisModel.tenant_id == tenant_id,
+                AIDailyAnalysisModel.analysis_date == hoje,
+            )
+            .first()
+        )
         if registro_existente:
             registro_existente.analysis_json = json.dumps(resposta_final, ensure_ascii=False)
         else:
             novo_registro = AIDailyAnalysisModel(
+                tenant_id=tenant_id,
                 analysis_date=hoje,
-                analysis_json=json.dumps(resposta_final, ensure_ascii=False)
+                analysis_json=json.dumps(resposta_final, ensure_ascii=False),
             )
             db.add(novo_registro)
         db.commit()
@@ -162,38 +198,48 @@ Gere um JSON rigoroso com a seguinte estrutura para preencher o card de análise
 async def rotina_agendamento_analise_7h():
     """
     Rotina assíncrona em background para executar a análise diária automaticamente
-    todos os dias pontualmente às 07:00 da manhã.
+    todos os dias pontualmente às 07:00 da manhã para cada tenant ativo com pontos cadastrados.
     """
-    logger.info("⏰ Rotina diária de análise com IA às 07:00 inicializada em background.")
+    logger.info("⏰ Rotina diária multitenant de análise com IA às 07:00 inicializada em background.")
     while True:
         try:
             agora = datetime.now()
-            # Alvo: hoje às 07:00
             alvo_hoje = datetime.combine(agora.date(), time(7, 0, 0))
 
             if agora >= alvo_hoje:
-                # Se já passou das 07:00 hoje, o próximo alvo é amanhã às 07:00
                 proxima_execucao = alvo_hoje + timedelta(days=1)
             else:
                 proxima_execucao = alvo_hoje
 
             segundos_espera = (proxima_execucao - agora).total_seconds()
-            logger.info(f"⏳ Próxima análise diária automática agendada para: {proxima_execucao.strftime('%d/%m/%Y %H:%M:%S')} (em {int(segundos_espera)}s)")
+            logger.info(
+                f"⏳ Próxima análise diária automática agendada para: {proxima_execucao.strftime('%d/%m/%Y %H:%M:%S')} (em {int(segundos_espera)}s)"
+            )
 
             await asyncio.sleep(segundos_espera)
 
-            # Executa a análise das 7h
-            logger.info("☀️ Executando análise diária automática das 07:00...")
+            logger.info("☀️ Executando análise diária automática das 07:00 por tenant...")
             db = SessionLocal()
             try:
-                executar_e_persistir_analise_diaria(db, forcar_atualizacao=True)
-                logger.info("✅ Análise diária das 07:00 concluída e persistida com sucesso no banco!")
+                tenants_ativos = [
+                    row[0]
+                    for row in db.query(MapPointModel.tenant_id)
+                    .filter(MapPointModel.tenant_id != "__legacy__")
+                    .distinct()
+                    .all()
+                    if row[0]
+                ]
+                for t_id in tenants_ativos:
+                    try:
+                        executar_e_persistir_analise_diaria(db, tenant_id=t_id, forcar_atualizacao=True)
+                    except Exception as tenant_err:
+                        logger.error(f"❌ Falha na análise diária das 07:00 para tenant {t_id[:8]}: {tenant_err}")
+                logger.info(f"✅ Análise diária das 07:00 processada para {len(tenants_ativos)} tenant(s)!")
             except Exception as run_err:
                 logger.error(f"❌ Falha ao executar análise diária agendada das 07:00: {run_err}")
             finally:
                 db.close()
 
-            # Pequena pausa de 60s para evitar disparo duplo no mesmo minuto
             await asyncio.sleep(60)
 
         except asyncio.CancelledError:
@@ -205,10 +251,13 @@ async def rotina_agendamento_analise_7h():
 
 
 @router.post("/simulacao", response_model=AISimulationResponse, summary="Avaliação de simulação preditiva com IA Groq")
-def avaliar_simulacao_ia(dados: AISimulationRequest):
+def avaliar_simulacao_ia(
+    dados: AISimulationRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
     """
-    Recebe os parâmetros ajustados na tela de simulação (sliders) e solicita ao Groq
-    uma análise técnica aprofundada no contexto da cana-de-açúcar.
+    Recebe os parâmetros ajustados na tela de simulação (sliders) pelo usuário autenticado
+    e solicita ao Groq uma análise técnica aprofundada no contexto da cana-de-açúcar.
     """
     _, model = get_groq_credentials()
 
@@ -234,7 +283,7 @@ Retorne um JSON estrito com esta estrutura:
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt_usuario}
+        {"role": "user", "content": prompt_usuario},
     ]
 
     try:
@@ -246,7 +295,7 @@ Retorne um JSON estrito com esta estrutura:
             technical_considerations=resultado.get("technical_considerations", "Sem considerações adicionais."),
             recommendations=resultado.get("recommendations", ["Monitorar parâmetros"]),
             alerts_suggested=resultado.get("alerts_suggested", []),
-            model_used=model
+            model_used=model,
         )
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
@@ -254,18 +303,25 @@ Retorne um JSON estrito com esta estrutura:
         logger.error(f"Erro ao processar simulação na IA: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falha na comunicação com o Groq: {str(e)}"
+            detail=f"Falha na comunicação com o Groq: {str(e)}",
         )
 
 
-@router.get("/analise-diaria", response_model=AIDailyAnalysisResponse, summary="Análise diária geral da plataforma (1x ao dia)")
-def obter_analise_diaria(forcar_atualizacao: bool = False, db: Session = Depends(get_db)):
+@router.get("/analise-diaria", response_model=AIDailyAnalysisResponse, summary="Análise diária geral da conta do usuário (1x ao dia)")
+def obter_analise_diaria(
+    forcar_atualizacao: bool = False,
+    tenant_id: str = Depends(get_current_tenant),
+    db: Session = Depends(get_db),
+):
     """
-    Retorna a análise da IA sobre o estado consolidado da plataforma.
-    Para economizar tokens, a avaliação é realizada apenas UMA vez ao dia e salva em cache no banco.
+    Retorna a análise da IA sobre o estado consolidado exclusivo do usuário autenticado.
     """
     try:
-        resultado = executar_e_persistir_analise_diaria(db, forcar_atualizacao=forcar_atualizacao)
+        resultado = executar_e_persistir_analise_diaria(
+            db,
+            tenant_id=tenant_id,
+            forcar_atualizacao=forcar_atualizacao,
+        )
         return AIDailyAnalysisResponse(**resultado)
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
@@ -273,6 +329,5 @@ def obter_analise_diaria(forcar_atualizacao: bool = False, db: Session = Depends
         logger.error(f"Erro ao processar análise diária no Groq: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falha na comunicação com o Groq: {str(e)}"
+            detail=f"Falha na comunicação com o Groq: {str(e)}",
         )
-

@@ -15,7 +15,7 @@ from database import init_db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="API Plataforma Cana", version="2.0.0")
+app = FastAPI(title="API Plataforma Cana", version="2.1.0")
 
 # ==========================================
 # 1. LIBERAÇÃO DO CORS
@@ -40,15 +40,19 @@ app.add_middleware(
 # ==========================================
 class ProtecaoCSRF(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Ignora CSRF para IA, ocorrências, usuários, mapa, histórico e alertas
+        # Requisições autenticadas com Authorization: Bearer (JWT explícito, não enviado automaticamente por cookies)
+        # ou rotas da API REST não dependem de cookie CSRF.
+        auth_header = request.headers.get("Authorization", "")
         if (
-            request.url.path == "/prever-qualidade-agua"
+            auth_header.lower().startswith("bearer ")
+            or request.url.path == "/prever-qualidade-agua"
             or request.url.path.startswith("/ocorrencias")
             or request.url.path.startswith("/users")
             or request.url.path.startswith("/mapa")
             or request.url.path.startswith("/historico")
             or request.url.path.startswith("/ia")
             or request.url.path.startswith("/alertas")
+            or request.url.path.startswith("/tarefas")
         ):
             return await call_next(request)
 
@@ -91,14 +95,19 @@ app.include_router(alertas.router, prefix="/alertas")
 import asyncio
 from services import telemetry_service
 
+_background_tasks = []
+
 @app.on_event("startup")
 async def ao_iniciar_aplicacao():
-    logger.info("🚀 Inicializando aplicação FastAPI Plataforma Cana...")
+    logger.info("🚀 Inicializando aplicação FastAPI Plataforma Cana (Multitenancy Ativo)...")
     init_db()
-    # Dispara a rotina diária em background para rodar todo dia às 7h da manhã
-    asyncio.create_task(ia_groq.rotina_agendamento_analise_7h())
-    # Dispara o serviço contínuo de telemetria autônoma em background
-    asyncio.create_task(telemetry_service.servico_telemetria_tempo_real())
+    # Dispara a rotina diária em background para rodar todo dia às 7h da manhã por tenant
+    _background_tasks.append(asyncio.create_task(ia_groq.rotina_agendamento_analise_7h()))
+    # Dispara o serviço contínuo de telemetria autônoma em background isolado por tenant
+    _background_tasks.append(asyncio.create_task(telemetry_service.servico_telemetria_tempo_real()))
 
-
-
+@app.on_event("shutdown")
+async def ao_encerrar_aplicacao():
+    for task in _background_tasks:
+        task.cancel()
+    _background_tasks.clear()

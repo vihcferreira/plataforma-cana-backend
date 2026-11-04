@@ -226,3 +226,132 @@ feature/cadastro-produtor
 * Manter o README atualizado.
 * Antes de iniciar uma tarefa, atualizar a branch `develop`.
 * Sempre revisar as alterações antes de criar o Pull Request.
+
+---
+
+## 🐳 Ambiente de Banco de Dados Local (Docker)
+
+Para subir o banco de dados MySQL localmente com as tabelas pré-configuradas, utilizamos o Docker com Docker Compose.
+
+### Estrutura necessária
+
+Certifique-se de que a estrutura de arquivos no projeto esteja da seguinte forma:
+
+```text
+plataforma-cana-backend/
+├── docker-compose.yml
+├── init/
+│   └── init.sql
+└── ...
+```
+
+> **Nota:** Os arquivos `docker-compose.yml` e `init/init.sql` não devem ser versionados com senhas reais (consulte o `.gitignore`).
+
+### 1. Criar o arquivo `docker-compose.yml`
+
+Na raiz do projeto (mesmo nível da pasta `init/`), crie o arquivo `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_water_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: water_management
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+volumes:
+  mysql_data:
+```
+
+### 2. Criar o script de inicialização `init/init.sql`
+
+Crie o diretório `init/` e dentro dele o arquivo `init.sql` contendo o script DDL de criação das tabelas e do banco de dados. Os scripts colocados nesta pasta são executados automaticamente no primeiro boot do container.
+
+### 3. Comandos de execução
+
+* **Iniciar o container em segundo plano:**
+  ```bash
+  docker compose up -d
+  ```
+
+* **Visualizar logs do banco:**
+  ```bash
+  docker compose logs -f mysql
+  ```
+
+* **Parar o container:**
+  ```bash
+  docker compose down
+  ```
+
+* **Parar e remover volumes (reinicializar o banco do zero):**
+  ```bash
+  docker compose down -v
+  ```
+
+### Dados de Conexão
+
+| Campo | Valor |
+| --- | --- |
+| **Host** | `localhost` |
+| **Porta** | `3306` |
+| **Database** | `water_management` |
+| **Usuário** | `user` |
+| **Senha** | `password` |
+| **Root Password** | `rootpassword` |
+
+---
+
+## 🚀 Inicialização do Servidor Backend (FastAPI)
+
+Após subir o container do MySQL, siga as etapas abaixo para configurar o ambiente e executar a API.
+
+### 1. Criar e Ativar o Ambiente Virtual (venv)
+
+* **No Windows (PowerShell):**
+  ```powershell
+  python -m venv venv
+  .\venv\Scripts\Activate.ps1
+  ```
+
+* **No Linux / macOS:**
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+
+### 2. Instalar as Dependências
+
+Com o ambiente virtual ativado:
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Iniciar o Servidor
+
+Execute o Uvicorn com recarregamento automático (`--reload`):
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+O servidor estará disponível em:
+* **API Base:** [http://localhost:8000](http://localhost:8000)
+* **Documentação Swagger (Swagger UI):** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Documentação Alternativa (ReDoc):** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+

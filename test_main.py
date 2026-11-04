@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 import auth_tenant
 import schemas
 from database import AIDailyAnalysisModel, Base
-from routers import alertas, app_user, historico, ia_groq, mapa, ocorrencias, tarefas
+from routers import alertas, app_user, ciclo_hidrico, historico, ia_groq, mapa, ocorrencias, tarefas
 from services import telemetry_service
 
 
@@ -283,6 +283,211 @@ class TestMultitenancyIsolation(unittest.TestCase):
         self.assertEqual(tarefas.listar_tarefas(concluida=None, busca=None, tenant_id=self.ctx_b.tenant_id), [])
         with self.assertRaises(HTTPException):
             tarefas.buscar_tarefa(t_a["id"], tenant_id=self.ctx_b.tenant_id)
+
+    def test_05_isolamento_e_fluxo_completo_ciclo_hidrico(self):
+        # 1. Cadastros base para Tenant Alpha (Property, Water_Seller, Environmental_Regulator)
+        prop_a = ciclo_hidrico.criar_propriedade(
+            schemas.PropertyCriar(property_address="Usina Alpha - Setor 01", property_city="Ribeirão Preto - SP"),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        seller_a = ciclo_hidrico.criar_fornecedor(
+            schemas.WaterSellerCriar(
+                cnpj_seller="12.345.678/0001-99",
+                name_seller="Captação Rio Pardo Alpha",
+                license_number_seller="OUT-DAEE-2026-01",
+            ),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        reg_a = ciclo_hidrico.criar_regulador(
+            schemas.EnvironmentalRegulatorCriar(
+                name_regulator="CETESB",
+                jurisdiction_regulator="Estadual - SP",
+            ),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+
+        # Isolamento entre tenants nos cadastros base
+        self.assertEqual(ciclo_hidrico.listar_propriedades(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
+        self.assertEqual(ciclo_hidrico.listar_fornecedores(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
+        self.assertEqual(ciclo_hidrico.listar_reguladores(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
+        with self.assertRaises(HTTPException) as err_prop_b:
+            ciclo_hidrico.excluir_propriedade(prop_a.id_property, tenant_id=self.ctx_b.tenant_id, db=self.db)
+        self.assertEqual(err_prop_b.exception.status_code, 404)
+
+        # 2. Áreas de Descarte (Area_Of_Disposal): uma homologada e outra não homologada
+        area_ok = ciclo_hidrico.criar_area_descarte(
+            schemas.AreaOfDisposalCriar(
+                id_property=prop_a.id_property,
+                x_coordinate=35.0,
+                y_coordinate=45.0,
+                is_validated_for_disposal=True,
+                license_number_disposal="LO-CETESB-1001",
+                id_regulator=reg_a.id_regulator,
+            ),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        area_pendente = ciclo_hidrico.criar_area_descarte(
+            schemas.AreaOfDisposalCriar(
+                id_property=prop_a.id_property,
+                x_coordinate=72.0,
+                y_coordinate=64.0,
+                is_validated_for_disposal=False,
+                license_number_disposal="LO-PENDENTE-999",
+                id_regulator=reg_a.id_regulator,
+            ),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        self.assertEqual(len(ciclo_hidrico.listar_areas_descarte(tenant_id=self.ctx_a.tenant_id, db=self.db)), 2)
+        self.assertEqual(ciclo_hidrico.listar_areas_descarte(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
+
+        # 3. Laudos Físico-Químicos (Measurement) avaliados com IA + CONAMA 430
+        laudo_limpo = ciclo_hidrico.criar_medicao_laboratorial(
+            schemas.MeasurementCriar(
+                ph_measurement=7.2,
+                o2_dissolved_measurement=6.8,
+                turbidity_measurement=14.0,
+                conductivity_measurement=310.0,
+                bod_measurement=12.0,
+                cod_measurement=38.0,
+                nitrogen_phosphorus_measurement=5.5,
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertTrue(laudo_limpo["conama_compliant"])
+        self.assertEqual(laudo_limpo["ml_status"], "Própria")
+
+        laudo_poluido = ciclo_hidrico.criar_medicao_laboratorial(
+            schemas.MeasurementCriar(
+                ph_measurement=4.3,
+                o2_dissolved_measurement=1.8,
+                turbidity_measurement=95.0,
+                conductivity_measurement=1150.0,
+                bod_measurement=140.0,
+                cod_measurement=380.0,
+                nitrogen_phosphorus_measurement=42.0,
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertFalse(laudo_poluido["conama_compliant"])
+        self.assertIn("Poluída", laudo_poluido["ml_status"])
+
+        # 4. Lote Hídrico (Water_Batch), Admissão (Water_Admission) e Armazenamento (Water_Storage)
+        lote_a = ciclo_hidrico.criar_lote(
+            schemas.WaterBatchCriar(id_seller=seller_a.id_seller, id_property=prop_a.id_property),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        adm_a = ciclo_hidrico.criar_admissao(
+            schemas.WaterAdmissionCriar(
+                id_batch=lote_a["id_batch"],
+                volume_admitted=5000.0,
+                id_measurement=laudo_limpo["id_measurement"],
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertEqual(adm_a["volume_admitted"], 5000.0)
+
+        sto_a = ciclo_hidrico.criar_armazenamento(
+            schemas.WaterStorageCriar(
+                id_property=prop_a.id_property,
+                volume_stored=3200.0,
+                id_measurement=laudo_limpo["id_measurement"],
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertEqual(sto_a["volume_stored"], 3200.0)
+
+        # 5. Descarte regular (área homologada + laudo conforme) -> NÃO gera alerta nem ocorrência
+        alerts_before = len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db))
+        occs_before = len(ocorrencias.listar_ocorrencias(tenant_id=self.ctx_a.tenant_id, db=self.db))
+
+        desc_ok = ciclo_hidrico.criar_descarte(
+            schemas.WaterDisposalCriar(
+                id_disposal_area=area_ok["id_disposal_area"],
+                volume_disposed=1200.0,
+                id_measurement=laudo_limpo["id_measurement"],
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertIsNone(desc_ok["generated_alert_code"])
+        self.assertIsNone(desc_ok["generated_occurrence_code"])
+        self.assertEqual(
+            len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db)),
+            alerts_before,
+        )
+
+        # 6. Descarte irregular (área não homologada + laudo poluído) -> GERA Alert + Occurrence + History_Event
+        desc_irreg = ciclo_hidrico.criar_descarte(
+            schemas.WaterDisposalCriar(
+                id_disposal_area=area_pendente["id_disposal_area"],
+                volume_disposed=800.0,
+                id_measurement=laudo_poluido["id_measurement"],
+            ),
+            ctx=self.ctx_a,
+            db=self.db,
+        )
+        self.assertIsNotNone(desc_irreg["generated_alert_code"])
+        self.assertIsNotNone(desc_irreg["generated_occurrence_code"])
+        self.assertEqual(
+            len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db)),
+            alerts_before + 1,
+        )
+        self.assertEqual(len(ocorrencias.listar_ocorrencias(tenant_id=self.ctx_a.tenant_id, db=self.db)), occs_before + 1)
+
+        # 7. Resumo consolidado do Ciclo Hídrico e isolamento total contra Tenant Beta
+        resumo_a = ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_a.tenant_id, db=self.db)
+        self.assertEqual(resumo_a["total_admitted_m3"], 5000.0)
+        self.assertEqual(resumo_a["total_stored_m3"], 3200.0)
+        self.assertEqual(resumo_a["total_disposed_m3"], 2000.0)
+        self.assertEqual(resumo_a["net_balance_m3"], 3000.0)
+        self.assertEqual(resumo_a["areas_count"], 2)
+        self.assertEqual(resumo_a["validated_areas_count"], 1)
+        self.assertEqual(resumo_a["measurements_count"], 2)
+        self.assertEqual(resumo_a["conama_compliance_pct"], 50.0)
+
+        resumo_b = ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_b.tenant_id, db=self.db)
+        self.assertEqual(resumo_b["total_admitted_m3"], 0.0)
+        self.assertEqual(resumo_b["measurements_count"], 0)
+        self.assertEqual(resumo_b["areas_count"], 0)
+
+        # Bloqueio de referência cruzada entre tenants (Tenant Beta tentando usar lote/área de Alpha)
+        with self.assertRaises(HTTPException) as err_cross:
+            ciclo_hidrico.criar_descarte(
+                schemas.WaterDisposalCriar(
+                    id_disposal_area=area_ok["id_disposal_area"],
+                    volume_disposed=100.0,
+                ),
+                ctx=self.ctx_b,
+                db=self.db,
+            )
+        self.assertEqual(err_cross.exception.status_code, 404)
+
+        # 8. Seed de demonstração popula as 9 tabelas isoladamente para Tenant Beta sem afetar Alpha
+        seed_b = ciclo_hidrico.popular_dados_exemplo(ctx=self.ctx_b, db=self.db)
+        self.assertTrue(seed_b["success"])
+        self.assertEqual(seed_b["summary"]["properties_count"], 2)
+        self.assertEqual(seed_b["summary"]["sellers_count"], 2)
+        self.assertEqual(seed_b["summary"]["regulators_count"], 2)
+        self.assertEqual(seed_b["summary"]["batches_count"], 2)
+        self.assertEqual(seed_b["summary"]["areas_count"], 2)
+        self.assertEqual(seed_b["summary"]["measurements_count"], 3)
+        self.assertEqual(seed_b["summary"]["admissions_count"], 1)
+        self.assertEqual(seed_b["summary"]["storages_count"], 1)
+        self.assertEqual(seed_b["summary"]["disposals_count"], 1)
+        self.assertEqual(
+            ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_a.tenant_id, db=self.db)["properties_count"],
+            1,
+        )
 
 
 if __name__ == "__main__":

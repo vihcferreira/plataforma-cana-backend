@@ -71,6 +71,7 @@ def executar_e_persistir_analise_diaria(
         "pontos_criticos": [],
         "total_pontos": 0,
         "ultimos_eventos": [],
+        "balanco_ciclo_hidrico": {},
     }
 
     try:
@@ -108,6 +109,9 @@ def executar_e_persistir_analise_diaria(
             f"[{e.event_type.upper()}] {e.event_point}: {e.event_description}"
             for e in eventos
         ]
+
+        from routers.ciclo_hidrico import calcular_resumo_ciclo_hidrico
+        dados_contexto["balanco_ciclo_hidrico"] = calcular_resumo_ciclo_hidrico(db=db, tenant_id=tenant_id)
     except Exception as db_err:
         logger.warning(f"Aviso ao consultar dados consolidados para IA do tenant {tenant_id[:8]}: {db_err}")
 
@@ -116,6 +120,7 @@ Contexto real consolidado da unidade deste usuário neste momento:
 - Total de pontos de monitoramento cadastrados: {dados_contexto['total_pontos']}
 - Pontos com atenção ou críticos: {json.dumps(dados_contexto['pontos_criticos'], ensure_ascii=False)}
 - Ocorrências ativas em andamento: {json.dumps(dados_contexto['ocorrencias_ativas'], ensure_ascii=False)}
+- Balanço hídrico operacional e laudos laboratoriais (Admissão/Armazenamento/Descarte/CONAMA): {json.dumps(dados_contexto['balanco_ciclo_hidrico'], ensure_ascii=False)}
 - Últimos eventos registrados no histórico: {json.dumps(dados_contexto['ultimos_eventos'], ensure_ascii=False)}
 
 Gere um JSON rigoroso com a seguinte estrutura para preencher o card de análise da tela principal:

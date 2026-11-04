@@ -7,6 +7,8 @@ from sqlalchemy import (
     Date,
     Enum,
     Float,
+    Boolean,
+    ForeignKey,
     Text,
     UniqueConstraint,
     text,
@@ -200,6 +202,105 @@ class TenantSettingsModel(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+# ==========================================
+# MODELOS SQLALCHEMY DO CICLO HÍDRICO E LICENCIAMENTO AMBIENTAL
+# ==========================================
+class WaterSellerModel(Base):
+    __tablename__ = "Water_Seller"
+
+    id_seller = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    cnpj_seller = Column(String(18), nullable=True)
+    name_seller = Column(String(255), nullable=False)
+    license_number_seller = Column(String(100), nullable=True)
+
+
+class PropertyModel(Base):
+    __tablename__ = "Property"
+
+    id_property = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    property_address = Column(String(255), nullable=False)
+    property_city = Column(String(100), nullable=False)
+
+
+class EnvironmentalRegulatorModel(Base):
+    __tablename__ = "Environmental_Regulator"
+
+    id_regulator = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    name_regulator = Column(String(255), nullable=False)
+    jurisdiction_regulator = Column(String(255), nullable=False)
+
+
+class MeasurementModel(Base):
+    __tablename__ = "Measurement"
+
+    id_measurement = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    datetime_measurement = Column(DateTime, default=datetime.utcnow)
+    ph_measurement = Column(Float, nullable=False, default=7.0)
+    o2_dissolved_measurement = Column(Float, nullable=False, default=6.0)
+    turbidity_measurement = Column(Float, nullable=False, default=20.0)
+    conductivity_measurement = Column(Float, nullable=False, default=350.0)
+    bod_measurement = Column(Float, nullable=False, default=15.0)
+    cod_measurement = Column(Float, nullable=False, default=45.0)
+    nitrogen_phosphorus_measurement = Column(Float, nullable=False, default=8.0)
+
+
+class WaterBatchModel(Base):
+    __tablename__ = "Water_Batch"
+
+    id_batch = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    id_seller = Column(Integer, ForeignKey("Water_Seller.id_seller"), nullable=True)
+    id_property = Column(Integer, ForeignKey("Property.id_property"), nullable=True)
+    datetime_batch_creation = Column(DateTime, default=datetime.utcnow)
+
+
+class AreaOfDisposalModel(Base):
+    __tablename__ = "Area_Of_Disposal"
+
+    id_disposal_area = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    id_property = Column(Integer, ForeignKey("Property.id_property"), nullable=True)
+    x_coordinate = Column(Float, nullable=False, default=50.0)
+    y_coordinate = Column(Float, nullable=False, default=50.0)
+    is_validated_for_disposal = Column(Boolean, nullable=False, default=False)
+    license_number_disposal = Column(String(100), nullable=True)
+    id_regulator = Column(Integer, ForeignKey("Environmental_Regulator.id_regulator"), nullable=True)
+
+
+class WaterAdmissionModel(Base):
+    __tablename__ = "Water_Admission"
+
+    id_admission = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    id_batch = Column(Integer, ForeignKey("Water_Batch.id_batch"), nullable=True)
+    volume_admitted = Column(Float, nullable=False, default=0.0)
+    id_measurement = Column(Integer, ForeignKey("Measurement.id_measurement"), nullable=True)
+
+
+class WaterStorageModel(Base):
+    __tablename__ = "Water_Storage"
+
+    id_storage = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    volume_stored = Column(Float, nullable=False, default=0.0)
+    id_measurement = Column(Integer, ForeignKey("Measurement.id_measurement"), nullable=True)
+    id_property = Column(Integer, ForeignKey("Property.id_property"), nullable=True)
+
+
+class WaterDisposalModel(Base):
+    __tablename__ = "Water_Disposal"
+
+    id_disposal = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id = Column(String(128), index=True, nullable=False)
+    id_disposal_area = Column(Integer, ForeignKey("Area_Of_Disposal.id_disposal_area"), nullable=True)
+    volume_disposed = Column(Float, nullable=False, default=0.0)
+    id_measurement = Column(Integer, ForeignKey("Measurement.id_measurement"), nullable=True)
+
+
 def _migrate_multitenancy_schema(conn) -> None:
     """
     Executa migração idempotente nas tabelas MySQL existentes para suportar Multitenancy:
@@ -214,6 +315,15 @@ def _migrate_multitenancy_schema(conn) -> None:
         "History_Event",
         "AI_Daily_Analysis",
         "Alert",
+        "Water_Seller",
+        "Property",
+        "Environmental_Regulator",
+        "Measurement",
+        "Water_Batch",
+        "Area_Of_Disposal",
+        "Water_Admission",
+        "Water_Storage",
+        "Water_Disposal",
     ]
 
     for tbl in tenant_tables:

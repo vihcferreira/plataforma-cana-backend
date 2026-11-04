@@ -6,7 +6,7 @@ import secrets
 import logging
 
 # 1. Importações dos routers
-from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa, historico, ia_groq, alertas
+from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa, historico, ia_groq, alertas, ciclo_hidrico
 from database import init_db
 
 # ==========================================
@@ -53,6 +53,7 @@ class ProtecaoCSRF(BaseHTTPMiddleware):
             or request.url.path.startswith("/ia")
             or request.url.path.startswith("/alertas")
             or request.url.path.startswith("/tarefas")
+            or request.url.path.startswith("/ciclo-hidrico")
         ):
             return await call_next(request)
 
@@ -88,6 +89,7 @@ app.include_router(mapa.router, prefix="/mapa")
 app.include_router(historico.router, prefix="/historico")
 app.include_router(ia_groq.router, prefix="/ia")
 app.include_router(alertas.router, prefix="/alertas")
+app.include_router(ciclo_hidrico.router, prefix="/ciclo-hidrico")
 
 # ==========================================
 # 4. EVENTOS DE CICLO DE VIDA (STARTUP)

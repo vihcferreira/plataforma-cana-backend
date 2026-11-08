@@ -1,344 +1,233 @@
+"""
+Serviço autônomo de Telemetria em Tempo Real — Plataforma Cana.
+Opera isoladamente por `tenant_id`, utilizando avaliação de risco, configurações em lote e
+criação de incidentes centralizadas em `services/` e executando I/O de banco em thread separada.
+"""
+
 import asyncio
-import random
 import logging
-import json
-from datetime import datetime
+import random
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 
-from database import (
-    SessionLocal,
-    MapPointModel,
-    MapMeasurementHistoryModel,
-    HistoryEventModel,
-    OccurrenceModel,
-    AlertModel,
-    AppUserModel,
-    TenantSettingsModel,
+from database import MapPointModel, SessionLocal
+from services.incident_service import (
+    obter_responsavel_tenant,
+    registrar_incidente_critico,
+    registrar_snapshot_medicao_mapa,
+)
+from services.tenant_settings_service import (
+    get_telemetry_active,
+    load_tenant_settings_batch,
+    set_telemetry_active,
+)
+from services.water_quality_service import (
+    POINT_THRESHOLDS,
+    evaluate_point_parameters,
+    utcnow,
 )
 
 logger = logging.getLogger(__name__)
 
-# Estado em memória isolado por tenant_id (ativo por padrão para cada tenant)
-_telemetria_por_tenant: Dict[str, bool] = {}
 _intervalo_segundos: int = 4
-
-
-def _ler_status_tenant(tenant_id: str, db: Optional[Session] = None) -> bool:
-    if db is not None:
-        try:
-            cfg = db.query(TenantSettingsModel).filter(TenantSettingsModel.tenant_id == tenant_id).first()
-            if cfg is not None:
-                ativo = bool(cfg.telemetry_active)
-                _telemetria_por_tenant[tenant_id] = ativo
-                return ativo
-        except Exception:
-            pass
-    return _telemetria_por_tenant.get(tenant_id, True)
 
 
 def obter_status_telemetria(tenant_id: str, db: Optional[Session] = None) -> dict:
     """Retorna o status atual do serviço de telemetria autônoma exclusivo para o tenant."""
-    ativo = _ler_status_tenant(tenant_id, db=db)
     return {
-        "active": ativo,
+        "active": get_telemetry_active(tenant_id, db=db),
         "interval_seconds": _intervalo_segundos,
     }
 
 
 def definir_status_telemetria(ativo: bool, tenant_id: str, db: Optional[Session] = None) -> dict:
     """Ativa ou desativa a telemetria autônoma exclusivamente para o tenant autenticado."""
-    _telemetria_por_tenant[tenant_id] = bool(ativo)
-    if db is not None:
-        try:
-            cfg = db.query(TenantSettingsModel).filter(TenantSettingsModel.tenant_id == tenant_id).first()
-            if not cfg:
-                cfg = TenantSettingsModel(
-                    tenant_id=tenant_id,
-                    telemetry_active=1 if ativo else 0,
-                )
-                db.add(cfg)
-            else:
-                cfg.telemetry_active = 1 if ativo else 0
-            db.commit()
-        except Exception:
-            db.rollback()
-
+    novo_estado = set_telemetry_active(tenant_id=tenant_id, active=bool(ativo), db=db)
     logger.info(
-        f"📡 [Telemetria][Tenant {tenant_id[:8]}] Estado alterado para: {'ATIVO' if ativo else 'PAUSADO'}"
+        f"[Telemetria][Tenant {tenant_id[:8]}] Estado alterado para: {'ATIVO' if novo_estado else 'PAUSADO'}"
     )
-    return obter_status_telemetria(tenant_id=tenant_id, db=db)
+    return {
+        "active": novo_estado,
+        "interval_seconds": _intervalo_segundos,
+    }
 
 
-def _obter_responsavel_do_tenant(db: Session, tenant_id: str, ponto: MapPointModel) -> str:
-    """Busca o responsável cadastrado no próprio tenant para este ponto (sem vazar nomes de outros tenants)."""
-    try:
-        usuario_ponto = (
-            db.query(AppUserModel)
-            .filter(
-                AppUserModel.tenant_id == tenant_id,
-                AppUserModel.status_user == "active",
-                AppUserModel.responsible_point_user == ponto.name_map_point,
-            )
-            .first()
-        )
-        if usuario_ponto and usuario_ponto.name_user:
-            return usuario_ponto.name_user
-
-        qualquer_usuario = (
-            db.query(AppUserModel)
-            .filter(
-                AppUserModel.tenant_id == tenant_id,
-                AppUserModel.status_user == "active",
-            )
-            .first()
-        )
-        if qualquer_usuario and qualquer_usuario.name_user:
-            return qualquer_usuario.name_user
-    except Exception:
-        pass
-    return "Responsável Local"
+def _aplicar_pico_anomalo(ponto: MapPointModel, indices: List[int]) -> None:
+    for idx in indices:
+        if idx == 0:
+            ponto.ph_map_point = 9.4 if random.random() < 0.5 else 5.2
+        elif idx == 1:
+            ponto.turbidity_map_point = 68.0
+        elif idx == 2:
+            ponto.volume_map_point = 4950.0
+        else:
+            ponto.contaminant_map_point = 3.6
 
 
-def _processar_ponto_do_tenant(db: Session, tenant_id: str, ponto: MapPointModel) -> None:
-    """Atualiza telemetria de um ponto específico mantendo todos os artefatos estritamente no mesmo tenant_id."""
-    # Micro-oscilações realistas gravitando em torno de níveis seguros
+def _mask_email(email_str: str | None) -> str:
+    """Mascara endereço de e-mail para conformidade LGPD em logs de aplicação (Art. 46)."""
+    if not email_str or "@" not in str(email_str):
+        return "***"
+    local, domain = str(email_str).strip().split("@", 1)
+    if len(local) <= 2:
+        return f"{local[0]}***@{domain}"
+    return f"{local[0]}***{local[-1]}@{domain}"
+
+
+def _processar_ponto_do_tenant(
+    db: Session,
+    tenant_id: str,
+    ponto: MapPointModel,
+    tenant_cfg: Optional[dict] = None,
+) -> None:
+    """Atualiza telemetria de um ponto específico mantendo todos os artefatos no mesmo `tenant_id`."""
     # 1. pH (Normal: 6.2 a 8.4 | Alvo ~7.2)
-    target_ph = 7.2
-    ph_pull = (target_ph - ponto.ph_map_point) * 0.15
+    ph_pull = (POINT_THRESHOLDS["ph"]["target"] - ponto.ph_map_point) * 0.15
     ph_noise = (random.random() - 0.5) * 0.25
     ponto.ph_map_point = round(min(9.5, max(5.0, ponto.ph_map_point + ph_pull + ph_noise)), 1)
 
     # 2. Turbidez (Normal: <= 30 NTU | Alvo ~22 NTU)
-    target_turb = 22.0
-    turb_pull = (target_turb - ponto.turbidity_map_point) * 0.15
+    turb_pull = (POINT_THRESHOLDS["turbidity"]["target"] - ponto.turbidity_map_point) * 0.15
     turb_noise = (random.random() - 0.48) * 3.5
     ponto.turbidity_map_point = round(min(75.0, max(8.0, ponto.turbidity_map_point + turb_pull + turb_noise)), 0)
 
     # 3. Volume (Normal: <= 3800 m³ | Alvo ~2800 m³)
     current_vol = getattr(ponto, "volume_map_point", 2800.0) or 2800.0
-    target_vol = 2800.0
-    vol_pull = (target_vol - current_vol) * 0.12
+    vol_pull = (POINT_THRESHOLDS["volume"]["target"] - current_vol) * 0.12
     vol_noise = (random.random() - 0.48) * 60.0
     ponto.volume_map_point = round(min(5200.0, max(1500.0, current_vol + vol_pull + vol_noise)), 0)
 
     # 4. Contaminantes (Normal: <= 1.2 mg/L | Alvo ~0.6 mg/L)
-    target_contam = 0.6
-    contam_pull = (target_contam - ponto.contaminant_map_point) * 0.15
+    contam_pull = (POINT_THRESHOLDS["contaminant"]["target"] - ponto.contaminant_map_point) * 0.15
     contam_noise = (random.random() - 0.5) * 0.12
     ponto.contaminant_map_point = round(min(4.0, max(0.1, ponto.contaminant_map_point + contam_pull + contam_noise)), 1)
 
-    # Ocorrência transitória rara (~7% de probabilidade de pico anômalo)
-    eh_pico_anomalo = random.random() < 0.07
-    if eh_pico_anomalo:
-        tipo_anomalia = random.randint(0, 3)
-        if tipo_anomalia == 0:
-            ponto.ph_map_point = 9.3 if random.random() < 0.5 else 5.2
-        elif tipo_anomalia == 1:
-            ponto.turbidity_map_point = 68.0
-        elif tipo_anomalia == 2:
-            ponto.volume_map_point = 4950.0
-        else:
-            ponto.contaminant_map_point = 3.6
+    # Ocorrência transitória rara (~7% de probabilidade: 1 parâmetro para atenção/médio ou 2 para crítico)
+    if random.random() < 0.07:
+        qtd_anomalias = 2 if random.random() < 0.35 else 1
+        _aplicar_pico_anomalo(ponto, random.sample([0, 1, 2, 3], k=qtd_anomalias))
 
-    # Determina severidades
-    ph_crit = ponto.ph_map_point < 5.5 or ponto.ph_map_point > 9.2
-    turb_crit = ponto.turbidity_map_point > 60.0
-    vol_crit = ponto.volume_map_point > 4800.0
-    contam_crit = ponto.contaminant_map_point > 3.2
-
-    crit_count = sum([ph_crit, turb_crit, vol_crit, contam_crit])
-    warn_count = sum([
-        5.5 <= ponto.ph_map_point < 6.2 or 8.4 < ponto.ph_map_point <= 9.2,
-        30.0 < ponto.turbidity_map_point <= 60.0,
-        3800.0 < ponto.volume_map_point <= 4800.0,
-        1.2 < ponto.contaminant_map_point <= 3.2,
-    ])
-
-    # Classificação de Risco
-    if crit_count >= 2:
-        novo_risco = "critical"
-    elif crit_count == 1 or warn_count >= 2:
-        novo_risco = "medium"
-    else:
-        novo_risco = "low"
-
-    ponto.risk_map_point = novo_risco
-    agora_utc = datetime.utcnow()
-    ponto.datetime_map_point_update = agora_utc
-
-    # Salva medição no histórico de medições isolado por tenant_id
-    hist_medicao = MapMeasurementHistoryModel(
-        tenant_id=tenant_id,
-        code_map_point=ponto.code_map_point,
-        name_map_point=ponto.name_map_point,
+    avaliacao = evaluate_point_parameters(
         ph=ponto.ph_map_point,
         turbidity=ponto.turbidity_map_point,
-        contaminant=ponto.contaminant_map_point,
         volume=ponto.volume_map_point,
-        risk=novo_risco,
-        recorded_at=agora_utc,
+        contaminant=ponto.contaminant_map_point,
     )
-    db.add(hist_medicao)
+    novo_risco = avaliacao["risk"]
+    agora_utc = utcnow()
 
-    # GERAÇÃO DE OCORRÊNCIA, ALERTA E HISTÓRICO SE O RISCO FOR CRÍTICO (no mesmo tenant_id)
+    ponto.risk_map_point = novo_risco
+    ponto.datetime_map_point_update = agora_utc
+
+    registrar_snapshot_medicao_mapa(db=db, tenant_id=tenant_id, ponto=ponto, recorded_at=agora_utc)
+
     if novo_risco == "critical":
-        detalhes = []
-        if ph_crit:
-            detalhes.append(f"pH {ponto.ph_map_point:.1f}")
-        if turb_crit:
-            detalhes.append(f"Turbidez {ponto.turbidity_map_point:.0f} NTU")
-        if contam_crit:
-            detalhes.append(f"Contaminantes {ponto.contaminant_map_point:.1f} mg/L")
-        if vol_crit:
-            detalhes.append(f"Volume {ponto.volume_map_point:.0f} m³")
-
-        if not detalhes:
-            detalhes.append("Parâmetros anômalos detectados")
-
-        responsavel_nome = _obter_responsavel_do_tenant(db, tenant_id, ponto)
-
-        # 1. Cria a Ocorrência formal no banco vinculada ao tenant_id
-        codigo_ocr = f"OCR-{random.randint(1000, 9999)}"
+        detalhes = avaliacao["crit_details"]
+        responsavel_nome = obter_responsavel_tenant(
+            db=db,
+            tenant_id=tenant_id,
+            point_name=ponto.name_map_point,
+            fallback="Responsável Local",
+        )
         metricas_formatadas = (
             f"PH: {ponto.ph_map_point:.1f} | "
             f"TUR: {ponto.turbidity_map_point:.0f} NTU | "
             f"CONT: {ponto.contaminant_map_point:.1f} mg/L | "
             f"VOL: {ponto.volume_map_point:.0f} m³"
         )
-
-        nova_ocorrencia = OccurrenceModel(
-            tenant_id=tenant_id,
-            code_occurrence=codigo_ocr,
-            title_occurrence=f"Nível Crítico — {ponto.name_map_point}",
-            location_occurrence=f"{ponto.code_map_point} - {ponto.name_map_point}",
-            responsible_occurrence=responsavel_nome,
-            metrics_occurrence=metricas_formatadas,
-            status_occurrence="analise",
-            risk_occurrence="critico",
-            datetime_occurrence_creation=agora_utc,
-        )
-        db.add(nova_ocorrencia)
-        db.flush()
-
-        # 2. Recomendação operacional contextualizada
-        if contam_crit:
-            recomendacao = "Interromper descarte de efluentes imediatamente e acionar equipe de campo para estancar vazamento."
-        elif ph_crit:
-            recomendacao = "Ajustar dosagem de neutralização química e calibrar sondas de monitoramento."
-        elif turb_crit:
-            recomendacao = "Acionar bacias de decantação suplementares e inspecionar filtros de retenção."
-        else:
-            recomendacao = "Inspecionar comportas de vazão e reforçar barreiras de contenção operacional."
-
-        mensagem_critica = (
-            f"Múltiplos parâmetros acima do limite aceitável simultaneamente: {', '.join(detalhes)}"
-            if len(detalhes) > 1
-            else f"Parâmetro anômalo com risco crítico detectado: {detalhes[0]}"
-        )
-
         params_chips = [
             f"pH: {ponto.ph_map_point:.1f}",
             f"Turbidez: {ponto.turbidity_map_point:.0f} NTU",
             f"Contaminantes: {ponto.contaminant_map_point:.1f} mg/L",
             f"Volume: {ponto.volume_map_point:.0f} m³",
         ]
-
-        # 3. Cria o Alerta vinculado exclusivamente a este tenant_id
-        codigo_alerta = f"AL-{random.randint(100, 999)}"
-        novo_alerta = AlertModel(
-            tenant_id=tenant_id,
-            code_alert=codigo_alerta,
-            point_name=ponto.name_map_point,
-            severity="critical",
-            status="active",
-            message=mensagem_critica,
-            params_json=json.dumps(params_chips),
-            recommendation=recomendacao,
-            responsible=responsavel_nome,
-            id_occurrence=nova_ocorrencia.id_occurrence,
-            code_occurrence=nova_ocorrencia.code_occurrence,
-            is_viewed=0,
-            datetime_alert=agora_utc,
+        mensagem_critica = (
+            f"Múltiplos parâmetros acima do limite aceitável simultaneamente: {', '.join(detalhes)}"
         )
-        db.add(novo_alerta)
 
-        # 4. Registra evento na timeline do Histórico deste tenant_id
-        evento_alerta = HistoryEventModel(
+        nova_ocr, novo_alerta, _ = registrar_incidente_critico(
+            db=db,
             tenant_id=tenant_id,
-            event_type="alerta",
-            event_label="Alerta Crítico de Qualidade",
-            event_point=f"{ponto.code_map_point} - {ponto.name_map_point}",
-            event_description=f"Telemetria detectou {', '.join(detalhes)}. Ocorrência #{codigo_ocr} e Alerta #{codigo_alerta} gerados.",
-            event_severity="critico",
+            occurrence_title=f"Nível Crítico — {ponto.name_map_point}",
+            location_label=f"{ponto.code_map_point} - {ponto.name_map_point}",
+            point_name=ponto.name_map_point,
+            responsible=responsavel_nome,
+            metrics_summary=metricas_formatadas,
+            alert_message=mensagem_critica,
+            params_chips=params_chips,
+            recommendation=avaliacao["recommendation"],
+            history_label="Alerta Crítico de Qualidade",
+            history_description_prefix=f"Telemetria detectou {', '.join(detalhes)}.",
             id_reference=ponto.id_map_point,
             reference_type="map_point",
             created_by="Telemetria Automática",
-            datetime_history=agora_utc,
+            created_at=agora_utc,
         )
-        db.add(evento_alerta)
+
         logger.warning(
-            f"🚨 [Telemetria][Tenant {tenant_id[:8]}] Alerta Crítico {codigo_alerta} e Ocorrência {codigo_ocr} gerados para {ponto.name_map_point}"
+            f"[Telemetria][Tenant {tenant_id[:8]}] Alerta {novo_alerta.code_alert} e Ocorrência {nova_ocr.code_occurrence} gerados para {ponto.name_map_point}"
         )
 
-        try:
-            from routers.alertas import obter_config_notificacoes_do_tenant
-            cfg_notif = obter_config_notificacoes_do_tenant(tenant_id=tenant_id, db=db)
-            if cfg_notif.get("email_alerts") and cfg_notif.get("user_email"):
-                logger.info(
-                    f"📧 [Email Alert][Tenant {tenant_id[:8]}] Alerta Crítico {codigo_alerta} ({ponto.name_map_point}) disparado para: {cfg_notif.get('user_email')}"
-                )
-        except Exception as err:
-            logger.debug(f"[Telemetria] Notificação por e-mail: {err}")
+        if tenant_cfg and tenant_cfg.get("email_alerts") and tenant_cfg.get("user_email"):
+            logger.info(
+                f"[Email Alert][Tenant {tenant_id[:8]}] Alerta Crítico {novo_alerta.code_alert} "
+                f"({ponto.name_map_point}) disparado para: {_mask_email(tenant_cfg.get('user_email'))}"
+            )
 
 
-async def servico_telemetria_tempo_real():
-    """
-    Serviço assíncrono em background executado continuamente no FastAPI.
-    Opera de maneira isolada por tenant_id: respeita o status ativo/pausado de cada conta
-    e propaga o tenant_id em todas as medições, ocorrências, alertas e eventos gerados.
-    """
-    logger.info("🛰️ [Telemetria] Serviço autônomo multitenant em background iniciado com sucesso.")
+def _executar_ciclo_telemetria_sync() -> None:
+    """Executa um ciclo síncrono de atualização em thread de worker sem bloquear o event loop."""
+    db = SessionLocal()
+    try:
+        todos_pontos = (
+            db.query(MapPointModel)
+            .filter(MapPointModel.tenant_id != "__legacy__")
+            .all()
+        )
+        if not todos_pontos:
+            return
 
+        pontos_por_tenant: Dict[str, List[MapPointModel]] = {}
+        for pt in todos_pontos:
+            if pt.tenant_id:
+                pontos_por_tenant.setdefault(pt.tenant_id, []).append(pt)
+
+        # 1 única query em lote para carregar configurações de todos os tenants presentes
+        configs_por_tenant = load_tenant_settings_batch(db, pontos_por_tenant.keys())
+
+        houve_atualizacao = False
+        for t_id, lista_pontos in pontos_por_tenant.items():
+            cfg = configs_por_tenant.get(t_id, {})
+            if not cfg.get("telemetry_active", True):
+                continue
+            ponto_escolhido = random.choice(lista_pontos)
+            _processar_ponto_do_tenant(
+                db=db,
+                tenant_id=t_id,
+                ponto=ponto_escolhido,
+                tenant_cfg=cfg,
+            )
+            houve_atualizacao = True
+
+        if houve_atualizacao:
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"[Telemetria] Erro no ciclo de telemetria: {exc}")
+    finally:
+        db.close()
+
+
+async def servico_telemetria_tempo_real() -> None:
+    """Serviço assíncrono em background que delega I/O de banco ao threadpool."""
+    logger.info("[Telemetria] Serviço autônomo multitenant em background iniciado com sucesso.")
     while True:
         try:
             await asyncio.sleep(_intervalo_segundos)
-
-            db = SessionLocal()
-            try:
-                todos_pontos = (
-                    db.query(MapPointModel)
-                    .filter(MapPointModel.tenant_id != "__legacy__")
-                    .all()
-                )
-                if not todos_pontos:
-                    continue
-
-                pontos_por_tenant: Dict[str, List[MapPointModel]] = {}
-                for pt in todos_pontos:
-                    if pt.tenant_id:
-                        pontos_por_tenant.setdefault(pt.tenant_id, []).append(pt)
-
-                houve_atualizacao = False
-                for t_id, lista_pontos in pontos_por_tenant.items():
-                    if not _ler_status_tenant(t_id, db=db):
-                        continue
-                    ponto_escolhido = random.choice(lista_pontos)
-                    _processar_ponto_do_tenant(db=db, tenant_id=t_id, ponto=ponto_escolhido)
-                    houve_atualizacao = True
-
-                if houve_atualizacao:
-                    db.commit()
-
-            except Exception as e:
-                db.rollback()
-                logger.error(f"❌ [Telemetria] Erro no ciclo de telemetria: {e}")
-            finally:
-                db.close()
-
+            await asyncio.to_thread(_executar_ciclo_telemetria_sync)
         except asyncio.CancelledError:
-            logger.info("🛑 [Telemetria] Serviço assíncrono cancelado.")
+            logger.info("[Telemetria] Serviço assíncrono cancelado.")
             break
-        except Exception as e:
-            logger.error(f"❌ [Telemetria] Erro inesperado: {e}")
+        except Exception as exc:
+            logger.error(f"[Telemetria] Erro inesperado: {exc}")
             await asyncio.sleep(2)

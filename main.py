@@ -1,113 +1,134 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-import secrets
+"""
+Ponto de entrada da API FastAPI — Plataforma Cana.
+"""
+
+import asyncio
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 import logging
+import os
+import time
 
-# 1. Importações dos routers
-from routers import tarefas, ia, dashboard, usuarios, ocorrencias, app_user, mapa, historico, ia_groq, alertas
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from auth_tenant import close_auth_http_client
 from database import init_db
+from routers import alertas, app_user, ciclo_hidrico, historico, ia_groq, mapa, ocorrencias
+from services import telemetry_service
+from services.groq_client import close_groq_http_client
 
-# ==========================================
-# 0. CONFIGURAÇÃO DE LOGS
-# ==========================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="API Plataforma Cana", version="2.1.0")
+IS_PROD = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
-# ==========================================
-# 1. LIBERAÇÃO DO CORS
-# ==========================================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Inicializando aplicação FastAPI Plataforma Cana (Multitenancy Ativo)...")
+    await asyncio.to_thread(init_db)
+
+    background_tasks = [
+        asyncio.create_task(ia_groq.rotina_agendamento_analise_7h()),
+        asyncio.create_task(telemetry_service.servico_telemetria_tempo_real()),
+    ]
+    try:
+        yield
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+        close_groq_http_client()
+        close_auth_http_client()
+
+
+app = FastAPI(
+    title="API Plataforma Cana",
+    version="2.2.0",
+    lifespan=lifespan,
+    docs_url=None if IS_PROD else "/docs",
+    redoc_url=None if IS_PROD else "/redoc",
+    openapi_url=None if IS_PROD else "/openapi.json",
+)
+
+def _get_cors_origins() -> list[str]:
+    default_origins = [
         "http://localhost:3000",
         "http://localhost:5173",
-        "http://localhost:5500",  # Porta padrão do Live Server do VS Code
+        "http://localhost:5500",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5500",
-    ],
+    ]
+    extra_raw = (os.getenv("CORS_ORIGINS") or "").strip()
+    if not extra_raw:
+        return default_origins
+    extra_list = [o.strip().rstrip("/") for o in extra_raw.split(",") if o.strip()]
+    return list(dict.fromkeys(default_origins + extra_list))
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_get_cors_origins(),
+    allow_origin_regex=os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"^https://.*\.(vercel\.app|netlify\.app|web\.app|firebaseapp\.com)$",
+    ),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
-# ==========================================
-# 2. MIDDLEWARE DE SEGURANÇA (CSRF)
-# ==========================================
-class ProtecaoCSRF(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Requisições autenticadas com Authorization: Bearer (JWT explícito, não enviado automaticamente por cookies)
-        # ou rotas da API REST não dependem de cookie CSRF.
-        auth_header = request.headers.get("Authorization", "")
-        if (
-            auth_header.lower().startswith("bearer ")
-            or request.url.path == "/prever-qualidade-agua"
-            or request.url.path.startswith("/ocorrencias")
-            or request.url.path.startswith("/users")
-            or request.url.path.startswith("/mapa")
-            or request.url.path.startswith("/historico")
-            or request.url.path.startswith("/ia")
-            or request.url.path.startswith("/alertas")
-            or request.url.path.startswith("/tarefas")
-        ):
-            return await call_next(request)
+# Rate Limiting em memória por IP/Rota (Proteção contra DoS e exaustão de cota LLM)
+_rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+_AI_RATE_LIMIT = 15  # máx 15 chamadas / 60s para rotas de IA e seed
+_GENERAL_RATE_LIMIT = 240  # máx 240 chamadas / 60s para rotas gerais
+_RATE_WINDOW_SECONDS = 60.0
 
-        cookie_token = request.cookies.get("XSRF-TOKEN")
-        
-        if request.method in ["POST", "PUT", "DELETE"]:
-            header_token = request.headers.get("X-XSRF-TOKEN")
-            if not cookie_token or not header_token or cookie_token != header_token:
-                return JSONResponse(
-                    status_code=403, 
-                    content={"detail": "Ataque CSRF bloqueado: Token inválido ou ausente."}
-                )
-        
-        resposta = await call_next(request)
-        if not cookie_token:
-            novo_token = secrets.token_urlsafe(32)
-            resposta.set_cookie(key="XSRF-TOKEN", value=novo_token, httponly=False)
-            
-        return resposta
 
-app.add_middleware(ProtecaoCSRF)
+@app.middleware("http")
+async def security_and_rate_limit_middleware(request: Request, call_next):
+    if request.method != "OPTIONS":
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        path = request.url.path
+        is_heavy_route = path.startswith("/ia/") or path.endswith("/seed-exemplo")
+        bucket_key = f"{client_ip}:{'heavy' if is_heavy_route else 'general'}"
+        max_reqs = _AI_RATE_LIMIT if is_heavy_route else _GENERAL_RATE_LIMIT
 
-# ==========================================
-# 3. REGISTRO DAS ROTAS
-# ==========================================
-app.include_router(tarefas.router, prefix="/tarefas")
-app.include_router(ia.router)
-app.include_router(dashboard.router)
-app.include_router(usuarios.router)
-app.include_router(ocorrencias.router, prefix="/ocorrencias") 
+        now = time.monotonic()
+        dq = _rate_buckets[bucket_key]
+        while dq and (now - dq[0]) > _RATE_WINDOW_SECONDS:
+            dq.popleft()
+
+        if len(dq) >= max_reqs:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Muitas requisições em um curto período. Aguarde alguns segundos e tente novamente."},
+                headers={"Retry-After": "60"},
+            )
+        dq.append(now)
+
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    if IS_PROD:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+@app.get("/health", tags=["Healthcheck"], summary="Verificação de saúde para nuvem (Render / Koyeb / Docker)")
+def healthcheck():
+    return {"status": "ok", "service": "plataforma-cana-api"}
+
+
+# Registro exclusivo das rotas ativas da plataforma
+app.include_router(ocorrencias.router, prefix="/ocorrencias")
 app.include_router(app_user.router, prefix="/users")
 app.include_router(mapa.router, prefix="/mapa")
 app.include_router(historico.router, prefix="/historico")
 app.include_router(ia_groq.router, prefix="/ia")
 app.include_router(alertas.router, prefix="/alertas")
-
-# ==========================================
-# 4. EVENTOS DE CICLO DE VIDA (STARTUP)
-# ==========================================
-import asyncio
-from services import telemetry_service
-
-_background_tasks = []
-
-@app.on_event("startup")
-async def ao_iniciar_aplicacao():
-    logger.info("🚀 Inicializando aplicação FastAPI Plataforma Cana (Multitenancy Ativo)...")
-    init_db()
-    # Dispara a rotina diária em background para rodar todo dia às 7h da manhã por tenant
-    _background_tasks.append(asyncio.create_task(ia_groq.rotina_agendamento_analise_7h()))
-    # Dispara o serviço contínuo de telemetria autônoma em background isolado por tenant
-    _background_tasks.append(asyncio.create_task(telemetry_service.servico_telemetria_tempo_real()))
-
-@app.on_event("shutdown")
-async def ao_encerrar_aplicacao():
-    for task in _background_tasks:
-        task.cancel()
-    _background_tasks.clear()
+app.include_router(ciclo_hidrico.router, prefix="/ciclo-hidrico")

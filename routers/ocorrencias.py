@@ -1,29 +1,30 @@
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
-import random
 
-from auth_tenant import get_current_tenant
-from database import get_db, OccurrenceModel
-from schemas import OcorrenciaCriar, OcorrenciaAtualizar, OcorrenciaResposta
+from auth_tenant import TenantContext, get_current_tenant, get_current_tenant_context
+from database import OccurrenceModel, get_db
+from schemas import OcorrenciaAtualizar, OcorrenciaCriar, OcorrenciaResposta
+from services.incident_service import gerar_codigo_ocorrencia_unico, registrar_evento_historico
 
 router = APIRouter(tags=["Ocorrências"])
 
 
-def _gerar_codigo_ocorrencia_unico(db: Session, tenant_id: str) -> str:
-    for _ in range(20):
-        candidato = f"OCR-{random.randint(1000, 9999)}"
-        existe = (
-            db.query(OccurrenceModel)
-            .filter(
-                OccurrenceModel.tenant_id == tenant_id,
-                OccurrenceModel.code_occurrence == candidato,
-            )
-            .first()
-        )
-        if not existe:
-            return candidato
-    return f"OCR-{random.randint(10000, 99999)}"
+def _mapear_severidade_historico(risco: str) -> str:
+    r = (risco or "").strip().lower()
+    if r.startswith("crit") or r == "high":
+        return "critico"
+    if r.startswith("med"):
+        return "medio"
+    return "normal"
+
+
+def _resolve_authenticated_author(ctx: TenantContext, responsible_fallback: str) -> str:
+    actor = ctx.email or f"uid:{ctx.tenant_id[:8]}"
+    if responsible_fallback and responsible_fallback != actor:
+        return f"{responsible_fallback} (autenticado: {actor})"
+    return actor
 
 
 @router.get("/", response_model=List[OcorrenciaResposta], summary="Listar todas as ocorrências do usuário")
@@ -39,33 +40,14 @@ def listar_ocorrencias(
     )
 
 
-@router.get("/{id_occurrence}", response_model=OcorrenciaResposta, summary="Buscar ocorrência por ID")
-def buscar_ocorrencia(
-    id_occurrence: int,
-    tenant_id: str = Depends(get_current_tenant),
-    db: Session = Depends(get_db),
-):
-    ocorrencia = (
-        db.query(OccurrenceModel)
-        .filter(
-            OccurrenceModel.id_occurrence == id_occurrence,
-            OccurrenceModel.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not ocorrencia:
-        raise HTTPException(status_code=404, detail="Ocorrência não encontrada.")
-    return ocorrencia
-
-
 @router.post("/", response_model=OcorrenciaResposta, status_code=status.HTTP_201_CREATED, summary="Criar nova ocorrência")
 def criar_ocorrencia(
     dados: OcorrenciaCriar,
-    tenant_id: str = Depends(get_current_tenant),
+    ctx: TenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
 ):
-    # Se o frontend não enviar um código (ex: 'OCR-1234'), geramos um automaticamente único para este tenant
-    codigo = dados.code_occurrence or _gerar_codigo_ocorrencia_unico(db, tenant_id)
+    tenant_id = ctx.tenant_id
+    codigo = dados.code_occurrence or gerar_codigo_ocorrencia_unico(db, tenant_id)
 
     nova_ocorrencia = OccurrenceModel(
         tenant_id=tenant_id,
@@ -79,6 +61,24 @@ def criar_ocorrencia(
     )
 
     db.add(nova_ocorrencia)
+    db.flush()
+
+    registrar_evento_historico(
+        db=db,
+        tenant_id=tenant_id,
+        event_type="ocorrencia",
+        event_label="Nova Ocorrência",
+        event_point=nova_ocorrencia.location_occurrence,
+        event_description=(
+            f"Ocorrência #{nova_ocorrencia.code_occurrence} registrada: "
+            f"{nova_ocorrencia.title_occurrence} ({nova_ocorrencia.metrics_occurrence})"
+        ),
+        event_severity=_mapear_severidade_historico(nova_ocorrencia.risk_occurrence),
+        id_reference=nova_ocorrencia.id_occurrence,
+        reference_type="occurrence",
+        created_by=_resolve_authenticated_author(ctx, nova_ocorrencia.responsible_occurrence),
+    )
+
     db.commit()
     db.refresh(nova_ocorrencia)
     return nova_ocorrencia
@@ -88,9 +88,10 @@ def criar_ocorrencia(
 def atualizar_ocorrencia(
     id_occurrence: int,
     dados: OcorrenciaAtualizar,
-    tenant_id: str = Depends(get_current_tenant),
+    ctx: TenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
 ):
+    tenant_id = ctx.tenant_id
     ocorrencia = (
         db.query(OccurrenceModel)
         .filter(
@@ -102,9 +103,25 @@ def atualizar_ocorrencia(
     if not ocorrencia:
         raise HTTPException(status_code=404, detail="Ocorrência não encontrada.")
 
-    # Atualiza apenas os campos enviados no JSON
     for campo, valor in dados.model_dump(exclude_unset=True).items():
         setattr(ocorrencia, campo, valor)
+
+    eh_encerrada = (ocorrencia.status_occurrence or "").lower() in ("encerradas", "resolvido")
+    registrar_evento_historico(
+        db=db,
+        tenant_id=tenant_id,
+        event_type="providencia" if eh_encerrada else "ocorrencia",
+        event_label="Ocorrência Encerrada" if eh_encerrada else "Atualização de Ocorrência",
+        event_point=ocorrencia.location_occurrence,
+        event_description=(
+            f"Ocorrência #{ocorrencia.code_occurrence} atualizada para status "
+            f"'{ocorrencia.status_occurrence}'. {ocorrencia.title_occurrence}."
+        ),
+        event_severity="normal" if eh_encerrada else _mapear_severidade_historico(ocorrencia.risk_occurrence),
+        id_reference=ocorrencia.id_occurrence,
+        reference_type="occurrence",
+        created_by=_resolve_authenticated_author(ctx, ocorrencia.responsible_occurrence),
+    )
 
     db.commit()
     db.refresh(ocorrencia)

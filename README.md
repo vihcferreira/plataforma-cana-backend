@@ -353,5 +353,49 @@ O servidor estará disponível em:
 * **API Base:** [http://localhost:8000](http://localhost:8000)
 * **Documentação Swagger (Swagger UI):** [http://localhost:8000/docs](http://localhost:8000/docs)
 * **Documentação Alternativa (ReDoc):** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+---
 
+## 📊 Parâmetros de Medição e Classificação de Risco
 
+O backend utiliza critérios analíticos bem definidos para telemetria contínua dos pontos de monitoramento (`Map_Point`), avaliação do ciclo hídrico (`Measurement`) e fiscalização automática de descartes.
+
+### 1. Faixas Operacionais dos Pontos de Monitoramento (`Map_Point`)
+
+No serviço de telemetria autônoma (`telemetry_service.py`), cada medição é classificada conforme os seguintes intervalos operacionais:
+
+| Parâmetro | Faixa Normal (Baixo Risco) | Faixa de Atenção (Alerta / `warn`) | Faixa Crítica (`crit`) | Alvo Médio |
+| :--- | :--- | :--- | :--- | :--- |
+| **pH** | `6.2` a `8.4` | `5.5 <= pH < 6.2` ou `8.4 < pH <= 9.2` | `< 5.5` ou `> 9.2` | `~7.2` |
+| **Turbidez** | `<= 30 NTU` | `> 30` a `<= 60 NTU` | `> 60 NTU` | `~22 NTU` |
+| **Volume de Efluentes** | `<= 3.800 m³` | `> 3.800` a `<= 4.800 m³` | `> 4.800 m³` | `~2.800 m³` |
+| **Contaminantes** | `<= 1.2 mg/L` | `> 1.2` a `<= 3.2 mg/L` | `> 3.2 mg/L` | `~0.6 mg/L` |
+
+### 2. Lógica de Atribuição do Nível de Risco (`risk_map_point`)
+
+A telemetria avalia simultaneamente o número de violações críticas (`crit_count`) e violações em atenção (`warn_count`):
+
+* **`critical` (Crítico):** `crit_count >= 2`
+  * Ocorre quando 2 ou mais parâmetros entram na faixa crítica simultaneamente.
+  * **Ação Automática:** Gera automaticamente registros no banco de dados vinculados ao mesmo `tenant_id`:
+    1. Uma nova **Ocorrência** (`Occurrence`) com risco crítico e status de análise.
+    2. Um novo **Alerta** (`Alert`) de severidade crítica com recomendação operacional imediata.
+    3. Um registro no **Histórico de Eventos** (`History_Event`) com severidade crítica.
+* **`medium` (Médio):** `crit_count == 1` ou `warn_count >= 2`
+  * Ocorre quando há 1 parâmetro crítico isolado ou 2 ou mais parâmetros na faixa de atenção preventiva.
+* **`low` (Baixo):** `crit_count == 0` e `warn_count <= 1`
+  * Todos os parâmetros operando em conformidade ou com apenas uma oscilação leve.
+
+### 3. Laudos Físico-Químicos Laboratoriais (`Measurement` / CONAMA 430)
+
+No módulo do **Ciclo Hídrico** (`routers/ciclo_hidrico.py`), os laudos laboratoriais de admissão, estocagem e fertirrigação são avaliados por meio da função `avaliar_qualidade_medicao`:
+
+* **Limites CONAMA 430 / Agroindustrial:**
+  * **pH:** entre `6.0` e `9.0`
+  * **Oxigênio Dissolvido (OD):** `>= 4.0 mg/L`
+  * **Turbidez:** `<= 40.0 NTU`
+  * **DBO (Demanda Bioquímica de Oxigênio):** `<= 60.0 mg/L`
+  * **DQO (Demanda Química de Oxigênio):** `<= 150.0 mg/L`
+* **Classificação por Machine Learning (`modelo_qualidade_agua.pkl`):**
+  * As variáveis `[pH, Temperatura_C, DBO_mgL, Turbidez_NTU]` são submetidas ao modelo supervisionado scikit-learn.
+  * O status resulta em **"Própria"** se aprovado tanto pelas normas CONAMA quanto pelo modelo de IA, ou **"Poluída (Risco de Efluentes)"** caso haja inconformidade.
+  * Descartes realizados em áreas não homologadas (`Area_Of_Disposal.is_validated_for_disposal = False`) ou com laudo poluído acionam automaticamente fiscalização via `Alert`, `Occurrence` e `History_Event`.

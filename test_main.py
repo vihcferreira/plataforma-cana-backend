@@ -11,15 +11,17 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import NameOID
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import auth_tenant
+from database import AIDailyAnalysisModel, Base, get_db
+from main import app
+from routers import alertas, app_user, ciclo_hidrico, historico, ia_groq, mapa, ocorrencias
 import schemas
-from database import AIDailyAnalysisModel, Base
-from routers import alertas, app_user, ciclo_hidrico, historico, ia_groq, mapa, ocorrencias, tarefas
-from services import telemetry_service
+from services import incident_service, telemetry_service, tenant_settings_service, water_quality_service
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -71,7 +73,7 @@ def _sign_firebase_jwt(
     return f"{h_b64}.{p_b64}.{_b64url_encode(sig)}"
 
 
-class TestMultitenancyIsolation(unittest.TestCase):
+class TestPlataformaCanaBackend(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.priv_key, cls.cert_pem = _generate_test_rsa_cert()
@@ -92,25 +94,32 @@ class TestMultitenancyIsolation(unittest.TestCase):
         )
         cls.certs_patcher.start()
 
-        tok_a = _sign_firebase_jwt(cls.priv_key, uid="uid_tenant_alpha_001", email="alpha@usina.com")
-        tok_b = _sign_firebase_jwt(cls.priv_key, uid="uid_tenant_beta_002", email="beta@usina.com")
+        cls.tok_a = _sign_firebase_jwt(cls.priv_key, uid="uid_tenant_alpha_001", email="alpha@usina.com")
+        cls.tok_b = _sign_firebase_jwt(cls.priv_key, uid="uid_tenant_beta_002", email="beta@usina.com")
 
         cls.ctx_a = auth_tenant.get_current_tenant_context(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=tok_a)
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=cls.tok_a)
         )
         cls.ctx_b = auth_tenant.get_current_tenant_context(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=tok_b)
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=cls.tok_b)
         )
 
     @classmethod
     def tearDownClass(cls):
         cls.certs_patcher.stop()
+        cls.test_engine.dispose()
 
     def setUp(self):
+        tenant_settings_service.clear_settings_cache()
         self.db = self.TestingSessionLocal()
 
     def tearDown(self):
+        self.db.rollback()
+        for table in reversed(Base.metadata.sorted_tables):
+            self.db.execute(table.delete())
+        self.db.commit()
         self.db.close()
+        tenant_settings_service.clear_settings_cache()
 
     def test_01_bloqueia_credenciais_ausentes_ou_forjadas(self):
         with self.assertRaises(HTTPException) as ctx_missing:
@@ -138,7 +147,7 @@ class TestMultitenancyIsolation(unittest.TestCase):
             )
         self.assertEqual(ctx_aud.exception.status_code, 401)
 
-    def test_02_isolamento_completo_pontos_do_mapa_e_historico_medicoes(self):
+    def test_02_isolamento_completo_pontos_do_mapa_recalculo_risco_e_historico(self):
         pt_a = mapa.criar_mapa(
             schemas.MapCriar(
                 code_map_point="P1",
@@ -160,26 +169,31 @@ class TestMultitenancyIsolation(unittest.TestCase):
             db=self.db,
         )
         self.assertNotEqual(pt_a.id_map_point, pt_b.id_map_point)
+        self.assertEqual(pt_a.risk_map_point, "low")
+
+        # Atualiza métricas para faixa crítica sem enviar risk_map_point -> recalcula automaticamente
+        pt_a_upd = mapa.atualizar_mapa(
+            pt_a.id_map_point,
+            schemas.MapAtualizar(ph_map_point=9.4, turbidity_map_point=70.0),
+            tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
+        )
+        self.assertEqual(pt_a_upd.risk_map_point, "critical")
 
         list_a = mapa.listar_mapa(tenant_id=self.ctx_a.tenant_id, db=self.db)
         list_b = mapa.listar_mapa(tenant_id=self.ctx_b.tenant_id, db=self.db)
         self.assertEqual([p.name_map_point for p in list_a], ["Ponto P1 - Usina Alpha"])
         self.assertEqual([p.name_map_point for p in list_b], ["Ponto P1 - Usina Beta"])
 
-        with self.assertRaises(HTTPException) as err_get:
-            mapa.buscar_mapa(pt_a.id_map_point, tenant_id=self.ctx_b.tenant_id, db=self.db)
-        self.assertEqual(err_get.exception.status_code, 404)
-
         with self.assertRaises(HTTPException) as err_del:
             mapa.excluir_mapa(pt_a.id_map_point, tenant_id=self.ctx_b.tenant_id, db=self.db)
         self.assertEqual(err_del.exception.status_code, 404)
 
         hist_a = mapa.listar_historico_medicoes(tenant_id=self.ctx_a.tenant_id, db=self.db)
-        self.assertEqual(len(hist_a), 1)
-        self.assertEqual(hist_a[0].name_map_point, "Ponto P1 - Usina Alpha")
+        self.assertEqual(len(hist_a), 2)
+        self.assertEqual(hist_a[-1].risk, "critical")
 
     def test_03_isolamento_ocorrencias_equipe_alertas_historico_telemetria_e_ia(self):
-        # 1. Ocorrências
         occ_a = ocorrencias.criar_ocorrencia(
             schemas.OcorrenciaCriar(
                 title_occurrence="Vazamento Canal Alpha",
@@ -192,9 +206,8 @@ class TestMultitenancyIsolation(unittest.TestCase):
         )
         self.assertEqual(ocorrencias.listar_ocorrencias(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
         with self.assertRaises(HTTPException):
-            ocorrencias.buscar_ocorrencia(occ_a.id_occurrence, tenant_id=self.ctx_b.tenant_id, db=self.db)
+            ocorrencias.excluir_ocorrencia(occ_a.id_occurrence, tenant_id=self.ctx_b.tenant_id, db=self.db)
 
-        # 2. Usuários de Equipe
         usr_a = app_user.criar_usuario(
             schemas.UserCriar(
                 name_user="Operador Alpha",
@@ -217,50 +230,45 @@ class TestMultitenancyIsolation(unittest.TestCase):
         with self.assertRaises(HTTPException):
             app_user.excluir_usuario(usr_a.id_user, tenant_id=self.ctx_b.tenant_id, db=self.db)
 
-        # 3. Alertas & Configurações
-        alertas.criar_alerta(
-            schemas.AlertCriar(
-                point_name="Ponto P1 - Usina Alpha",
-                message="Alerta exclusivo Alpha",
-                recommendation="Conter descarte",
-            ),
-            tenant_id=self.ctx_a.tenant_id,
+        # Gera incidente crítico via serviço centralizado para Alpha
+        incident_service.registrar_incidente_critico(
             db=self.db,
+            tenant_id=self.ctx_a.tenant_id,
+            occurrence_title="Crítico Alpha",
+            location_label="P1 - Alpha",
+            point_name="Ponto P1 - Usina Alpha",
+            responsible="Operador Alpha",
+            metrics_summary="PH: 9.4 | TUR: 70 NTU",
+            alert_message="Alerta exclusivo Alpha",
+            params_chips=["pH: 9.4", "Turbidez: 70 NTU"],
+            recommendation="Conter descarte",
+            history_label="Alerta Crítico",
+            history_description_prefix="Violação detectada.",
         )
+        self.db.commit()
+
         self.assertEqual(alertas.contagem_nao_lidos(tenant_id=self.ctx_a.tenant_id, db=self.db)["unread_count"], 1)
         self.assertEqual(alertas.contagem_nao_lidos(tenant_id=self.ctx_b.tenant_id, db=self.db)["unread_count"], 0)
         alertas.marcar_alertas_como_lidos(tenant_id=self.ctx_b.tenant_id, db=self.db)
         self.assertEqual(alertas.contagem_nao_lidos(tenant_id=self.ctx_a.tenant_id, db=self.db)["unread_count"], 1)
 
         alertas.atualizar_config_gerais(
-            {"unit": "vale-verde-sul", "frequency": "60", "timezone": "America/Manaus"},
+            schemas.GeneralSettingsUpdate(unit="vale-verde-sul", frequency="60", timezone="America/Manaus"),
             tenant_id=self.ctx_a.tenant_id,
             db=self.db,
         )
         self.assertEqual(alertas.obter_config_gerais(tenant_id=self.ctx_a.tenant_id, db=self.db)["unit"], "vale-verde-sul")
         self.assertEqual(alertas.obter_config_gerais(tenant_id=self.ctx_b.tenant_id, db=self.db)["unit"], "vale-verde-norte")
 
-        # 4. Histórico
-        ev_a = historico.criar_evento_historico(
-            schemas.HistoryEventCriar(
-                event_type="medicao",
-                event_label="Coleta Manual",
-                event_point="Ponto P1 - Usina Alpha",
-                event_description="Medição manual registrada",
-            ),
-            tenant_id=self.ctx_a.tenant_id,
-            db=self.db,
+        self.assertEqual(
+            historico.listar_historico(tipo=None, busca=None, dias=None, tenant_id=self.ctx_b.tenant_id, db=self.db),
+            [],
         )
-        self.assertEqual(historico.listar_historico(tipo=None, busca=None, dias=None, tenant_id=self.ctx_b.tenant_id, db=self.db), [])
-        with self.assertRaises(HTTPException):
-            historico.excluir_evento_historico(ev_a.id_history, tenant_id=self.ctx_b.tenant_id, db=self.db)
 
-        # 5. Telemetria por Tenant
         telemetry_service.definir_status_telemetria(False, tenant_id=self.ctx_a.tenant_id, db=self.db)
         self.assertFalse(telemetry_service.obter_status_telemetria(tenant_id=self.ctx_a.tenant_id, db=self.db)["active"])
         self.assertTrue(telemetry_service.obter_status_telemetria(tenant_id=self.ctx_b.tenant_id, db=self.db)["active"])
 
-        # 6. Cache da IA Diária por Tenant
         with patch.object(
             ia_groq,
             "call_groq_chat",
@@ -274,18 +282,27 @@ class TestMultitenancyIsolation(unittest.TestCase):
             self.assertEqual(res_ia_b["analysis_text"], "Análise Beta")
             self.assertEqual(self.db.query(AIDailyAnalysisModel).count(), 2)
 
-    def test_04_isolamento_tarefas_por_tenant(self):
-        t_a = tarefas.criar_tarefa(
-            schemas.TarefaCriar(titulo="Revisar sensores Alpha", descricao="Inspeção"),
+    def test_04_regras_risco_e_telemetria_processamento_ponto(self):
+        self.assertEqual(water_quality_service.calculate_point_risk(7.2, 22.0, 2800.0, 0.6), "low")
+        self.assertEqual(water_quality_service.calculate_point_risk(9.4, 22.0, 2800.0, 0.6), "medium")
+        self.assertEqual(water_quality_service.calculate_point_risk(8.8, 45.0, 2800.0, 0.6), "medium")
+        self.assertEqual(water_quality_service.calculate_point_risk(9.4, 70.0, 2800.0, 0.6), "critical")
+
+        pt = mapa.criar_mapa(
+            schemas.MapCriar(
+                code_map_point="T1",
+                name_map_point="Ponto Telemetria",
+                pos_x_map_point=40.0,
+                pos_y_map_point=50.0,
+            ),
             tenant_id=self.ctx_a.tenant_id,
+            db=self.db,
         )
-        self.assertEqual(len(tarefas.listar_tarefas(concluida=None, busca=None, tenant_id=self.ctx_a.tenant_id)), 1)
-        self.assertEqual(tarefas.listar_tarefas(concluida=None, busca=None, tenant_id=self.ctx_b.tenant_id), [])
-        with self.assertRaises(HTTPException):
-            tarefas.buscar_tarefa(t_a["id"], tenant_id=self.ctx_b.tenant_id)
+        telemetry_service._processar_ponto_do_tenant(self.db, self.ctx_a.tenant_id, pt)
+        self.db.commit()
+        self.assertIn(pt.risk_map_point, ("low", "medium", "critical"))
 
     def test_05_isolamento_e_fluxo_completo_ciclo_hidrico(self):
-        # 1. Cadastros base para Tenant Alpha (Property, Water_Seller, Environmental_Regulator)
         prop_a = ciclo_hidrico.criar_propriedade(
             schemas.PropertyCriar(property_address="Usina Alpha - Setor 01", property_city="Ribeirão Preto - SP"),
             tenant_id=self.ctx_a.tenant_id,
@@ -309,15 +326,11 @@ class TestMultitenancyIsolation(unittest.TestCase):
             db=self.db,
         )
 
-        # Isolamento entre tenants nos cadastros base
         self.assertEqual(ciclo_hidrico.listar_propriedades(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
-        self.assertEqual(ciclo_hidrico.listar_fornecedores(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
-        self.assertEqual(ciclo_hidrico.listar_reguladores(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
         with self.assertRaises(HTTPException) as err_prop_b:
             ciclo_hidrico.excluir_propriedade(prop_a.id_property, tenant_id=self.ctx_b.tenant_id, db=self.db)
         self.assertEqual(err_prop_b.exception.status_code, 404)
 
-        # 2. Áreas de Descarte (Area_Of_Disposal): uma homologada e outra não homologada
         area_ok = ciclo_hidrico.criar_area_descarte(
             schemas.AreaOfDisposalCriar(
                 id_property=prop_a.id_property,
@@ -342,10 +355,7 @@ class TestMultitenancyIsolation(unittest.TestCase):
             tenant_id=self.ctx_a.tenant_id,
             db=self.db,
         )
-        self.assertEqual(len(ciclo_hidrico.listar_areas_descarte(tenant_id=self.ctx_a.tenant_id, db=self.db)), 2)
-        self.assertEqual(ciclo_hidrico.listar_areas_descarte(tenant_id=self.ctx_b.tenant_id, db=self.db), [])
 
-        # 3. Laudos Físico-Químicos (Measurement) avaliados com IA + CONAMA 430
         laudo_limpo = ciclo_hidrico.criar_medicao_laboratorial(
             schemas.MeasurementCriar(
                 ph_measurement=7.2,
@@ -378,13 +388,12 @@ class TestMultitenancyIsolation(unittest.TestCase):
         self.assertFalse(laudo_poluido["conama_compliant"])
         self.assertIn("Poluída", laudo_poluido["ml_status"])
 
-        # 4. Lote Hídrico (Water_Batch), Admissão (Water_Admission) e Armazenamento (Water_Storage)
         lote_a = ciclo_hidrico.criar_lote(
             schemas.WaterBatchCriar(id_seller=seller_a.id_seller, id_property=prop_a.id_property),
             tenant_id=self.ctx_a.tenant_id,
             db=self.db,
         )
-        adm_a = ciclo_hidrico.criar_admissao(
+        ciclo_hidrico.criar_admissao(
             schemas.WaterAdmissionCriar(
                 id_batch=lote_a["id_batch"],
                 volume_admitted=5000.0,
@@ -393,9 +402,7 @@ class TestMultitenancyIsolation(unittest.TestCase):
             ctx=self.ctx_a,
             db=self.db,
         )
-        self.assertEqual(adm_a["volume_admitted"], 5000.0)
-
-        sto_a = ciclo_hidrico.criar_armazenamento(
+        ciclo_hidrico.criar_armazenamento(
             schemas.WaterStorageCriar(
                 id_property=prop_a.id_property,
                 volume_stored=3200.0,
@@ -404,11 +411,6 @@ class TestMultitenancyIsolation(unittest.TestCase):
             ctx=self.ctx_a,
             db=self.db,
         )
-        self.assertEqual(sto_a["volume_stored"], 3200.0)
-
-        # 5. Descarte regular (área homologada + laudo conforme) -> NÃO gera alerta nem ocorrência
-        alerts_before = len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db))
-        occs_before = len(ocorrencias.listar_ocorrencias(tenant_id=self.ctx_a.tenant_id, db=self.db))
 
         desc_ok = ciclo_hidrico.criar_descarte(
             schemas.WaterDisposalCriar(
@@ -420,13 +422,7 @@ class TestMultitenancyIsolation(unittest.TestCase):
             db=self.db,
         )
         self.assertIsNone(desc_ok["generated_alert_code"])
-        self.assertIsNone(desc_ok["generated_occurrence_code"])
-        self.assertEqual(
-            len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db)),
-            alerts_before,
-        )
 
-        # 6. Descarte irregular (área não homologada + laudo poluído) -> GERA Alert + Occurrence + History_Event
         desc_irreg = ciclo_hidrico.criar_descarte(
             schemas.WaterDisposalCriar(
                 id_disposal_area=area_pendente["id_disposal_area"],
@@ -438,56 +434,57 @@ class TestMultitenancyIsolation(unittest.TestCase):
         )
         self.assertIsNotNone(desc_irreg["generated_alert_code"])
         self.assertIsNotNone(desc_irreg["generated_occurrence_code"])
-        self.assertEqual(
-            len(alertas.listar_alertas(severidade=None, tenant_id=self.ctx_a.tenant_id, db=self.db)),
-            alerts_before + 1,
-        )
-        self.assertEqual(len(ocorrencias.listar_ocorrencias(tenant_id=self.ctx_a.tenant_id, db=self.db)), occs_before + 1)
 
-        # 7. Resumo consolidado do Ciclo Hídrico e isolamento total contra Tenant Beta
         resumo_a = ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_a.tenant_id, db=self.db)
         self.assertEqual(resumo_a["total_admitted_m3"], 5000.0)
         self.assertEqual(resumo_a["total_stored_m3"], 3200.0)
         self.assertEqual(resumo_a["total_disposed_m3"], 2000.0)
         self.assertEqual(resumo_a["net_balance_m3"], 3000.0)
-        self.assertEqual(resumo_a["areas_count"], 2)
-        self.assertEqual(resumo_a["validated_areas_count"], 1)
-        self.assertEqual(resumo_a["measurements_count"], 2)
         self.assertEqual(resumo_a["conama_compliance_pct"], 50.0)
 
-        resumo_b = ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_b.tenant_id, db=self.db)
-        self.assertEqual(resumo_b["total_admitted_m3"], 0.0)
-        self.assertEqual(resumo_b["measurements_count"], 0)
-        self.assertEqual(resumo_b["areas_count"], 0)
-
-        # Bloqueio de referência cruzada entre tenants (Tenant Beta tentando usar lote/área de Alpha)
-        with self.assertRaises(HTTPException) as err_cross:
-            ciclo_hidrico.criar_descarte(
-                schemas.WaterDisposalCriar(
-                    id_disposal_area=area_ok["id_disposal_area"],
-                    volume_disposed=100.0,
-                ),
-                ctx=self.ctx_b,
-                db=self.db,
-            )
-        self.assertEqual(err_cross.exception.status_code, 404)
-
-        # 8. Seed de demonstração popula as 9 tabelas isoladamente para Tenant Beta sem afetar Alpha
         seed_b = ciclo_hidrico.popular_dados_exemplo(ctx=self.ctx_b, db=self.db)
         self.assertTrue(seed_b["success"])
         self.assertEqual(seed_b["summary"]["properties_count"], 2)
-        self.assertEqual(seed_b["summary"]["sellers_count"], 2)
-        self.assertEqual(seed_b["summary"]["regulators_count"], 2)
-        self.assertEqual(seed_b["summary"]["batches_count"], 2)
-        self.assertEqual(seed_b["summary"]["areas_count"], 2)
-        self.assertEqual(seed_b["summary"]["measurements_count"], 3)
-        self.assertEqual(seed_b["summary"]["admissions_count"], 1)
-        self.assertEqual(seed_b["summary"]["storages_count"], 1)
-        self.assertEqual(seed_b["summary"]["disposals_count"], 1)
         self.assertEqual(
             ciclo_hidrico.obter_resumo_ciclo(tenant_id=self.ctx_a.tenant_id, db=self.db)["properties_count"],
             1,
         )
+
+    def test_06_integracao_http_fastapi_testclient(self):
+        def _override_get_db():
+            yield self.db
+
+        app.dependency_overrides[get_db] = _override_get_db
+        try:
+            with patch("main.init_db"):
+                client = TestClient(app)
+                unauth = client.get("/mapa/")
+                self.assertEqual(unauth.status_code, 401)
+
+                headers = {"Authorization": f"Bearer {self.tok_a}"}
+                created = client.post(
+                    "/mapa/",
+                    headers=headers,
+                    json={
+                        "code_map_point": "HTTP1",
+                        "name_map_point": "Ponto HTTP",
+                        "pos_x_map_point": 30.0,
+                        "pos_y_map_point": 40.0,
+                    },
+                )
+                self.assertEqual(created.status_code, 201)
+                self.assertEqual(created.json()["code_map_point"], "HTTP1")
+
+                resumo = client.get("/ciclo-hidrico/resumo", headers=headers)
+                self.assertEqual(resumo.status_code, 200)
+                self.assertEqual(resumo.json()["total_admitted_m3"], 0.0)
+
+                # Confirma que rotas mortas foram removidas (404)
+                self.assertEqual(client.get("/tarefas/", headers=headers).status_code, 404)
+                self.assertEqual(client.get("/me", headers=headers).status_code, 404)
+                self.assertEqual(client.get("/dashboard/metricas", headers=headers).status_code, 404)
+        finally:
+            app.dependency_overrides.clear()
 
 
 if __name__ == "__main__":

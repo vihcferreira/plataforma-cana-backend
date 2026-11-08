@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from datetime import timedelta
 from typing import List, Optional
-from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
 
 from auth_tenant import get_current_tenant
-from database import get_db, HistoryEventModel
-from schemas import HistoryEventCriar, HistoryEventResposta
+from database import HistoryEventModel, get_db
+from schemas import HistoryEventResposta
+from services.water_quality_service import utcnow
 
 router = APIRouter(tags=["Histórico"])
 
@@ -36,68 +38,7 @@ def listar_historico(
         )
 
     if dias and dias > 0:
-        data_limite = datetime.utcnow() - timedelta(days=dias)
+        data_limite = utcnow() - timedelta(days=dias)
         query = query.filter(HistoryEventModel.datetime_history >= data_limite)
 
-    # Ordena pelos eventos mais recentes primeiro
-    eventos = query.order_by(HistoryEventModel.datetime_history.desc()).all()
-    return eventos
-
-
-@router.get("/{id_history}", response_model=HistoryEventResposta)
-def obter_evento_historico(
-    id_history: int,
-    tenant_id: str = Depends(get_current_tenant),
-    db: Session = Depends(get_db),
-):
-    evento = (
-        db.query(HistoryEventModel)
-        .filter(
-            HistoryEventModel.id_history == id_history,
-            HistoryEventModel.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not evento:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evento de histórico não encontrado.",
-        )
-    return evento
-
-
-@router.post("/", response_model=HistoryEventResposta, status_code=status.HTTP_201_CREATED)
-def criar_evento_historico(
-    dados: HistoryEventCriar,
-    tenant_id: str = Depends(get_current_tenant),
-    db: Session = Depends(get_db),
-):
-    novo_evento = HistoryEventModel(**dados.model_dump(), tenant_id=tenant_id)
-    db.add(novo_evento)
-    db.commit()
-    db.refresh(novo_evento)
-    return novo_evento
-
-
-@router.delete("/{id_history}", status_code=status.HTTP_204_NO_CONTENT)
-def excluir_evento_historico(
-    id_history: int,
-    tenant_id: str = Depends(get_current_tenant),
-    db: Session = Depends(get_db),
-):
-    evento = (
-        db.query(HistoryEventModel)
-        .filter(
-            HistoryEventModel.id_history == id_history,
-            HistoryEventModel.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not evento:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evento de histórico não encontrado.",
-        )
-    db.delete(evento)
-    db.commit()
-    return None
+    return query.order_by(HistoryEventModel.datetime_history.desc()).limit(500).all()

@@ -1,40 +1,56 @@
+"""
+Configuração SQLAlchemy, Modelos ORM Multitenant e Migração Otimizada em Lote — Plataforma Cana.
+"""
+
+from datetime import datetime, timezone
+import logging
+import os
+
 from sqlalchemy import (
-    create_engine,
+    Boolean,
     Column,
-    Integer,
-    String,
-    DateTime,
     Date,
+    DateTime,
     Enum,
     Float,
-    Boolean,
     ForeignKey,
+    Index,
+    Integer,
+    String,
     Text,
     UniqueConstraint,
+    bindparam,
+    create_engine,
     text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime, date
-import logging
+
+from services.groq_client import load_env_once
+
+load_env_once()
 
 logger = logging.getLogger(__name__)
 
-# URL de conexao com as credenciais do seu docker-compose.yml
-DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+DEFAULT_DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,  # Verifica se a conexao ainda esta ativa antes de usar
+    pool_pre_ping=True,
     pool_recycle=3600,
-    connect_args={"connect_timeout": 3}
+    connect_args={"connect_timeout": 3} if DATABASE_URL.startswith("mysql") else {},
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# Dependencia do FastAPI para injetar a sessao do banco nas rotas
+
 def get_db():
     db = SessionLocal()
     try:
@@ -42,8 +58,9 @@ def get_db():
     finally:
         db.close()
 
+
 # ==========================================
-# MODELO SQLALCHEMY DA TABELA OCCURRENCE
+# MODELOS SQLALCHEMY MULTITENANT
 # ==========================================
 class OccurrenceModel(Base):
     __tablename__ = "Occurrence"
@@ -60,11 +77,9 @@ class OccurrenceModel(Base):
     metrics_occurrence = Column(String(255), nullable=False)
     status_occurrence = Column(String(50), nullable=False, default="analise")
     risk_occurrence = Column(String(50), nullable=False, default="medio")
-    datetime_occurrence_creation = Column(DateTime, default=datetime.utcnow)
+    datetime_occurrence_creation = Column(DateTime, default=_utcnow)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA APP_USER
-# ==========================================
+
 class AppUserModel(Base):
     __tablename__ = "App_User"
     __table_args__ = (
@@ -77,17 +92,11 @@ class AppUserModel(Base):
     email_user = Column(String(255), index=True, nullable=False)
     role_user = Column(String(255), nullable=False, default="Operador")
     responsible_point_user = Column(String(255), nullable=False)
-    status_user = Column(
-        Enum("active", "inactive"),
-        nullable=False,
-        default="active"
-    )
+    status_user = Column(Enum("active", "inactive"), nullable=False, default="active")
     last_access_datetime = Column(DateTime, nullable=True)
-    datetime_user_creation = Column(DateTime, default=datetime.utcnow)
+    datetime_user_creation = Column(DateTime, default=_utcnow)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA MAP_POINT
-# ==========================================
+
 class MapPointModel(Base):
     __tablename__ = "Map_Point"
     __table_args__ = (
@@ -102,19 +111,20 @@ class MapPointModel(Base):
     geo_coordinate_map_point = Column(String(50), nullable=True)
     pos_x_map_point = Column(Float, nullable=False)
     pos_y_map_point = Column(Float, nullable=False)
-    ph_map_point = Column(Float, nullable=False)
-    turbidity_map_point = Column(Float, nullable=False)
-    contaminant_map_point = Column(Float, nullable=False)
-    volume_map_point = Column(Float, nullable=False, default=4000.0)
-    risk_map_point = Column(String(50), nullable=False)
-    datetime_map_point_creation = Column(DateTime, default=datetime.utcnow)
-    datetime_map_point_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    ph_map_point = Column(Float, nullable=False, default=7.2)
+    turbidity_map_point = Column(Float, nullable=False, default=20.0)
+    contaminant_map_point = Column(Float, nullable=False, default=0.6)
+    volume_map_point = Column(Float, nullable=False, default=2800.0)
+    risk_map_point = Column(String(50), nullable=False, default="low")
+    datetime_map_point_creation = Column(DateTime, default=_utcnow)
+    datetime_map_point_update = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
-# ==========================================
-# MODELO SQLALCHEMY DE HISTÓRICO DE MEDIÇÕES DOS PONTOS (Para preservar análise nos gráficos)
-# ==========================================
+
 class MapMeasurementHistoryModel(Base):
     __tablename__ = "Map_Measurement_History"
+    __table_args__ = (
+        Index("idx_mmh_tenant_recorded", "tenant_id", "recorded_at"),
+    )
 
     id_measurement = Column(Integer, primary_key=True, index=True, autoincrement=True)
     tenant_id = Column(String(128), index=True, nullable=False)
@@ -123,31 +133,30 @@ class MapMeasurementHistoryModel(Base):
     ph = Column(Float, nullable=False)
     turbidity = Column(Float, nullable=False)
     contaminant = Column(Float, nullable=False)
-    volume = Column(Float, nullable=False, default=4000.0)
+    volume = Column(Float, nullable=False, default=2800.0)
     risk = Column(String(50), nullable=False, default="low")
-    recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
+    recorded_at = Column(DateTime, default=_utcnow, index=True)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA HISTORY_EVENT
-# ==========================================
+
 class HistoryEventModel(Base):
     __tablename__ = "History_Event"
+    __table_args__ = (
+        Index("idx_history_tenant_dt", "tenant_id", "datetime_history"),
+    )
 
     id_history = Column(Integer, primary_key=True, index=True, autoincrement=True)
     tenant_id = Column(String(128), index=True, nullable=False)
-    event_type = Column(String(50), nullable=False, index=True)  # 'medicao', 'providencia', 'ocorrencia', 'alerta'
+    event_type = Column(String(50), nullable=False, index=True)
     event_label = Column(String(100), nullable=False)
     event_point = Column(String(255), nullable=False)
     event_description = Column(Text, nullable=False)
-    event_severity = Column(String(50), nullable=False, default="normal")  # 'normal', 'medio', 'critico'
+    event_severity = Column(String(50), nullable=False, default="normal")
     id_reference = Column(Integer, nullable=True)
     reference_type = Column(String(50), nullable=True)
     created_by = Column(String(255), nullable=True)
-    datetime_history = Column(DateTime, default=datetime.utcnow, index=True)
+    datetime_history = Column(DateTime, default=_utcnow, index=True)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA AI_DAILY_ANALYSIS
-# ==========================================
+
 class AIDailyAnalysisModel(Base):
     __tablename__ = "AI_Daily_Analysis"
     __table_args__ = (
@@ -158,36 +167,32 @@ class AIDailyAnalysisModel(Base):
     tenant_id = Column(String(128), index=True, nullable=False)
     analysis_date = Column(Date, index=True, nullable=False)
     analysis_json = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA ALERT
-# ==========================================
+
 class AlertModel(Base):
     __tablename__ = "Alert"
     __table_args__ = (
         UniqueConstraint("tenant_id", "code_alert", name="uq_alert_tenant_code"),
+        Index("idx_alert_tenant_viewed", "tenant_id", "is_viewed"),
     )
 
     id_alert = Column(Integer, primary_key=True, index=True, autoincrement=True)
     tenant_id = Column(String(128), index=True, nullable=False)
     code_alert = Column(String(20), index=True, nullable=False)
     point_name = Column(String(255), nullable=False)
-    severity = Column(String(50), nullable=False, default="critical")  # 'critical', 'medium', 'preventive', 'resolved'
-    status = Column(String(50), nullable=False, default="active")      # 'active', 'resolved'
+    severity = Column(String(50), nullable=False, default="critical")
+    status = Column(String(50), nullable=False, default="active")
     message = Column(Text, nullable=False)
-    params_json = Column(Text, nullable=False)                         # JSON array de strings: '["pH: 9.3", "Turbidez: 68 NTU"]'
+    params_json = Column(Text, nullable=False)
     recommendation = Column(Text, nullable=False)
     responsible = Column(String(255), nullable=False, default="Responsável Local")
-    id_occurrence = Column(Integer, nullable=True)                     # Referência à ocorrência criada
-    code_occurrence = Column(String(20), nullable=True)                # Código da ocorrência (ex: OCR-1082)
-    is_viewed = Column(Integer, default=0)                             # 0 = não visualizado, 1 = visualizado
-    datetime_alert = Column(DateTime, default=datetime.utcnow, index=True)
+    id_occurrence = Column(Integer, nullable=True)
+    code_occurrence = Column(String(20), nullable=True)
+    is_viewed = Column(Integer, default=0)
+    datetime_alert = Column(DateTime, default=_utcnow, index=True)
 
-# ==========================================
-# MODELO SQLALCHEMY DA TABELA TENANT_SETTINGS
-# Preferências operacionais e status de telemetria isolados por usuário (tenant)
-# ==========================================
+
 class TenantSettingsModel(Base):
     __tablename__ = "Tenant_Settings"
 
@@ -199,11 +204,11 @@ class TenantSettingsModel(Base):
     push_alerts = Column(Integer, nullable=False, default=1)
     user_email = Column(String(255), nullable=True, default="")
     telemetry_active = Column(Integer, nullable=False, default=1)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 # ==========================================
-# MODELOS SQLALCHEMY DO CICLO HÍDRICO E LICENCIAMENTO AMBIENTAL
+# MODELOS DO CICLO HÍDRICO E LICENCIAMENTO
 # ==========================================
 class WaterSellerModel(Base):
     __tablename__ = "Water_Seller"
@@ -238,7 +243,7 @@ class MeasurementModel(Base):
 
     id_measurement = Column(Integer, primary_key=True, index=True, autoincrement=True)
     tenant_id = Column(String(128), index=True, nullable=False)
-    datetime_measurement = Column(DateTime, default=datetime.utcnow)
+    datetime_measurement = Column(DateTime, default=_utcnow)
     ph_measurement = Column(Float, nullable=False, default=7.0)
     o2_dissolved_measurement = Column(Float, nullable=False, default=6.0)
     turbidity_measurement = Column(Float, nullable=False, default=20.0)
@@ -255,7 +260,7 @@ class WaterBatchModel(Base):
     tenant_id = Column(String(128), index=True, nullable=False)
     id_seller = Column(Integer, ForeignKey("Water_Seller.id_seller"), nullable=True)
     id_property = Column(Integer, ForeignKey("Property.id_property"), nullable=True)
-    datetime_batch_creation = Column(DateTime, default=datetime.utcnow)
+    datetime_batch_creation = Column(DateTime, default=_utcnow)
 
 
 class AreaOfDisposalModel(Base):
@@ -303,9 +308,7 @@ class WaterDisposalModel(Base):
 
 def _migrate_multitenancy_schema(conn) -> None:
     """
-    Executa migração idempotente nas tabelas MySQL existentes para suportar Multitenancy:
-    1. Garante coluna `tenant_id` e índice em todas as tabelas de domínio.
-    2. Substitui restrições UNIQUE globais antigas por UNIQUE compostas `(tenant_id, campo)`.
+    Executa migração idempotente consultando INFORMATION_SCHEMA em lote (2 queries no total em vez de 38).
     """
     tenant_tables = [
         "Occurrence",
@@ -326,31 +329,37 @@ def _migrate_multitenancy_schema(conn) -> None:
         "Water_Disposal",
     ]
 
-    for tbl in tenant_tables:
-        col_exists = conn.execute(
-            text(
-                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tbl AND COLUMN_NAME = 'tenant_id'"
-            ),
-            {"tbl": tbl},
-        ).scalar()
+    cols_stmt = text(
+        "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN :tables "
+        "AND COLUMN_NAME IN ('tenant_id', 'volume_map_point')"
+    ).bindparams(bindparam("tables", expanding=True))
+    existing_cols = {(r[0], r[1]) for r in conn.execute(cols_stmt, {"tables": tenant_tables}).fetchall()}
 
-        if not col_exists:
+    if ("Map_Point", "volume_map_point") not in existing_cols:
+        try:
+            conn.execute(text("ALTER TABLE `Map_Point` ADD COLUMN `volume_map_point` FLOAT NOT NULL DEFAULT 2800.0"))
+            conn.commit()
+        except Exception:
+            pass
+
+    for tbl in tenant_tables:
+        if (tbl, "tenant_id") not in existing_cols:
             conn.execute(
                 text(f"ALTER TABLE `{tbl}` ADD COLUMN `tenant_id` VARCHAR(128) NOT NULL DEFAULT '__legacy__'")
             )
             conn.commit()
-            logger.info(f"🔒 [Multitenancy Migration] Coluna tenant_id adicionada em {tbl}.")
+            logger.info(f"[Multitenancy Migration] Coluna tenant_id adicionada em {tbl}.")
 
-        idx_exists = conn.execute(
-            text(
-                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tbl AND COLUMN_NAME = 'tenant_id'"
-            ),
-            {"tbl": tbl},
-        ).scalar()
+    stats_stmt = text(
+        "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN :tables"
+    ).bindparams(bindparam("tables", expanding=True))
+    stat_rows = conn.execute(stats_stmt, {"tables": tenant_tables}).fetchall()
 
-        if not idx_exists:
+    indexed_tenant_tables = {r[0] for r in stat_rows if r[3] == "tenant_id"}
+    for tbl in tenant_tables:
+        if tbl not in indexed_tenant_tables:
             try:
                 conn.execute(text(f"CREATE INDEX `idx_{tbl}_tenant_id` ON `{tbl}` (`tenant_id`)"))
                 conn.commit()
@@ -365,31 +374,21 @@ def _migrate_multitenancy_schema(conn) -> None:
         ("Alert", "code_alert", "uq_alert_tenant_code"),
     ]
 
+    unique_indexes_by_table = {}
+    for tbl_name, idx_name, non_unique, col_name in stat_rows:
+        if non_unique == 0 and idx_name != "PRIMARY":
+            unique_indexes_by_table.setdefault(tbl_name, {}).setdefault(idx_name, set()).add(col_name)
+
     for tbl, col_name, uq_name in composite_uniques:
-        rows = conn.execute(
-            text(
-                "SELECT INDEX_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tbl "
-                "AND NON_UNIQUE = 0 AND INDEX_NAME != 'PRIMARY'"
-            ),
-            {"tbl": tbl},
-        ).fetchall()
-
-        indexes_by_name = {}
-        for idx_name, c_name in rows:
-            indexes_by_name.setdefault(idx_name, set()).add(c_name)
-
-        # Remove qualquer índice UNIQUE antigo sobre a coluna que não inclua tenant_id
+        indexes_by_name = unique_indexes_by_table.get(tbl, {})
         for idx_name, cols in indexes_by_name.items():
             if col_name in cols and "tenant_id" not in cols:
                 try:
                     conn.execute(text(f"ALTER TABLE `{tbl}` DROP INDEX `{idx_name}`"))
                     conn.commit()
-                    logger.info(f"🔒 [Multitenancy Migration] Índice global '{idx_name}' removido de {tbl}.")
                 except Exception as drop_err:
                     logger.warning(f"[Multitenancy Migration] Aviso ao remover índice {idx_name} de {tbl}: {drop_err}")
 
-        # Cria a restrição UNIQUE composta por (tenant_id, col_name) se ainda não existir
         has_composite = any(cols == {"tenant_id", col_name} for cols in indexes_by_name.values())
         if not has_composite:
             try:
@@ -397,36 +396,18 @@ def _migrate_multitenancy_schema(conn) -> None:
                     text(f"ALTER TABLE `{tbl}` ADD CONSTRAINT `{uq_name}` UNIQUE (`tenant_id`, `{col_name}`)")
                 )
                 conn.commit()
-                logger.info(f"🔒 [Multitenancy Migration] Constraint composta '{uq_name}' criada em {tbl}.")
             except Exception as uq_err:
                 logger.warning(f"[Multitenancy Migration] Aviso ao criar constraint {uq_name} em {tbl}: {uq_err}")
 
 
-def init_db():
+def init_db() -> None:
     try:
         Base.metadata.create_all(bind=engine)
-        with engine.connect() as conn:
-            # Migration defensiva para adicionar volume_map_point se Map_Point já existir
-            try:
-                vol_exists = conn.execute(
-                    text(
-                        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
-                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Map_Point' "
-                        "AND COLUMN_NAME = 'volume_map_point'"
-                    )
-                ).scalar()
-                if not vol_exists:
-                    conn.execute(
-                        text("ALTER TABLE Map_Point ADD COLUMN volume_map_point FLOAT NOT NULL DEFAULT 4000.0")
-                    )
-                    conn.commit()
-            except Exception:
-                pass
-
-            # Migration defensiva para Multitenancy
-            try:
-                _migrate_multitenancy_schema(conn)
-            except Exception as mt_err:
-                logger.warning(f"[Multitenancy Migration] Aviso na migração automática: {mt_err}")
-    except Exception as e:
-        logger.warning(f"[Database] Banco de dados indisponível na inicialização: {e}")
+        if engine.dialect.name == "mysql":
+            with engine.connect() as conn:
+                try:
+                    _migrate_multitenancy_schema(conn)
+                except Exception as mt_err:
+                    logger.warning(f"[Multitenancy Migration] Aviso na migração automática: {mt_err}")
+    except Exception as exc:
+        logger.warning(f"[Database] Banco de dados indisponível na inicialização: {exc}")

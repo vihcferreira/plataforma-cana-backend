@@ -1,60 +1,60 @@
 """
 Router do Ciclo Hídrico, Laudos Laboratoriais e Licenciamento Ambiental — Plataforma Cana / AquaGuard
-Integra e orquestra de ponta a ponta as 9 tabelas operacionais e regulatórias do banco de dados
-(Property, Water_Seller, Environmental_Regulator, Measurement, Water_Batch, Area_Of_Disposal,
-Water_Admission, Water_Storage e Water_Disposal) com isolamento Multitenancy (tenant_id),
-classificação automática via modelo ML (modelo_qualidade_agua.pkl) e auditoria em Alert/Occurrence/History_Event.
 """
 
-from datetime import datetime
-import json
 import logging
-import random
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional
 
-import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
-from auth_tenant import get_current_tenant, get_current_tenant_context, TenantContext
+from auth_tenant import TenantContext, get_current_tenant, get_current_tenant_context
 from database import (
-    get_db,
-    WaterSellerModel,
-    PropertyModel,
+    AreaOfDisposalModel,
     EnvironmentalRegulatorModel,
     MeasurementModel,
-    WaterBatchModel,
-    AreaOfDisposalModel,
+    PropertyModel,
     WaterAdmissionModel,
-    WaterStorageModel,
+    WaterBatchModel,
     WaterDisposalModel,
-    OccurrenceModel,
-    AlertModel,
-    HistoryEventModel,
-    AppUserModel,
+    WaterSellerModel,
+    WaterStorageModel,
+    get_db,
 )
-from routers.ia import modelo_ia
 from schemas import (
-    WaterSellerCriar,
-    WaterSellerResposta,
-    PropertyCriar,
-    PropertyResposta,
+    AreaOfDisposalAtualizar,
+    AreaOfDisposalCriar,
+    AreaOfDisposalResposta,
     EnvironmentalRegulatorCriar,
     EnvironmentalRegulatorResposta,
     MeasurementCriar,
     MeasurementResposta,
-    WaterBatchCriar,
-    WaterBatchResposta,
-    AreaOfDisposalCriar,
-    AreaOfDisposalAtualizar,
-    AreaOfDisposalResposta,
+    PropertyCriar,
+    PropertyResposta,
     WaterAdmissionCriar,
     WaterAdmissionResposta,
-    WaterStorageCriar,
-    WaterStorageResposta,
+    WaterBatchCriar,
+    WaterBatchResposta,
+    WaterCycleSummaryResponse,
     WaterDisposalCriar,
     WaterDisposalResposta,
-    WaterCycleSummaryResponse,
+    WaterSellerCriar,
+    WaterSellerResposta,
+    WaterStorageCriar,
+    WaterStorageResposta,
+)
+from services.incident_service import (
+    obter_responsavel_tenant,
+    registrar_evento_historico,
+    registrar_incidente_critico,
+)
+from services.water_quality_service import (
+    CONAMA_THRESHOLDS,
+    avaliar_qualidade_medicao,
+    serialize_measurement,
+    serialize_measurements_map,
+    utcnow,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,75 +62,65 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Ciclo Hídrico e Licenciamento"])
 
 
-# ==========================================
-# UTILITÁRIOS DE AVALIAÇÃO ML / CONAMA E SERIALIZAÇÃO
-# ==========================================
-def avaliar_qualidade_medicao(m: MeasurementModel) -> tuple[str, bool]:
-    """
-    Combina o classificador de Machine Learning (modelo_qualidade_agua.pkl) com os limites
-    físico-químicos CONAMA 430 / fertirrigação agroindustrial.
-    """
-    ph = float(m.ph_measurement if m.ph_measurement is not None else 7.0)
-    od = float(m.o2_dissolved_measurement if m.o2_dissolved_measurement is not None else 6.0)
-    turb = float(m.turbidity_measurement if m.turbidity_measurement is not None else 20.0)
-    dbo = float(m.bod_measurement if m.bod_measurement is not None else 15.0)
-    dqo = float(m.cod_measurement if m.cod_measurement is not None else 45.0)
-
-    conama_ok = (
-        6.0 <= ph <= 9.0
-        and od >= 4.0
-        and turb <= 40.0
-        and dbo <= 60.0
-        and dqo <= 150.0
-    )
-
-    ml_status = "Própria" if conama_ok else "Poluída (Risco de Efluentes)"
-    if modelo_ia is not None:
-        try:
-            df_in = pd.DataFrame(
-                [
-                    {
-                        "pH": ph,
-                        "Temperatura_C": 25.0,
-                        "DBO_mgL": dbo,
-                        "Turbidez_NTU": turb,
-                    }
-                ]
-            )
-            pred = modelo_ia.predict(df_in)
-            if int(pred[0]) == 1 and conama_ok:
-                ml_status = "Própria"
-            else:
-                ml_status = "Poluída (Risco de Efluentes)"
-        except Exception as exc:
-            logger.debug(f"[CicloHidrico] Fallback na avaliação ML da medição: {exc}")
-
-    return ml_status, conama_ok
-
-
-def serialize_measurement(m: Optional[MeasurementModel]) -> Optional[dict]:
-    if not m:
-        return None
-    ml_status, conama_ok = avaliar_qualidade_medicao(m)
-    return {
-        "id_measurement": m.id_measurement,
-        "datetime_measurement": m.datetime_measurement,
-        "ph_measurement": m.ph_measurement,
-        "o2_dissolved_measurement": m.o2_dissolved_measurement,
-        "turbidity_measurement": m.turbidity_measurement,
-        "conductivity_measurement": m.conductivity_measurement,
-        "bod_measurement": m.bod_measurement,
-        "cod_measurement": m.cod_measurement,
-        "nitrogen_phosphorus_measurement": m.nitrogen_phosphorus_measurement,
-        "ml_status": ml_status,
-        "conama_compliant": conama_ok,
-    }
-
-
 def format_property_label(prop: Optional[PropertyModel]) -> str:
     if not prop:
         return "Unidade não informada"
     return f"{prop.property_address} ({prop.property_city})"
+
+
+def _load_properties_by_ids(db: Session, tenant_id: str, ids: Iterable[Optional[int]]) -> Dict[int, PropertyModel]:
+    valid_ids = [i for i in set(ids) if i is not None]
+    if not valid_ids:
+        return {}
+    rows = (
+        db.query(PropertyModel)
+        .filter(PropertyModel.tenant_id == tenant_id, PropertyModel.id_property.in_(valid_ids))
+        .all()
+    )
+    return {p.id_property: p for p in rows}
+
+
+def _load_sellers_by_ids(db: Session, tenant_id: str, ids: Iterable[Optional[int]]) -> Dict[int, WaterSellerModel]:
+    valid_ids = [i for i in set(ids) if i is not None]
+    if not valid_ids:
+        return {}
+    rows = (
+        db.query(WaterSellerModel)
+        .filter(WaterSellerModel.tenant_id == tenant_id, WaterSellerModel.id_seller.in_(valid_ids))
+        .all()
+    )
+    return {s.id_seller: s for s in rows}
+
+
+def _load_regulators_by_ids(
+    db: Session, tenant_id: str, ids: Iterable[Optional[int]]
+) -> Dict[int, EnvironmentalRegulatorModel]:
+    valid_ids = [i for i in set(ids) if i is not None]
+    if not valid_ids:
+        return {}
+    rows = (
+        db.query(EnvironmentalRegulatorModel)
+        .filter(
+            EnvironmentalRegulatorModel.tenant_id == tenant_id,
+            EnvironmentalRegulatorModel.id_regulator.in_(valid_ids),
+        )
+        .all()
+    )
+    return {r.id_regulator: r for r in rows}
+
+
+def _load_serialized_measurements_by_ids(
+    db: Session, tenant_id: str, ids: Iterable[Optional[int]]
+) -> Dict[int, dict]:
+    valid_ids = [i for i in set(ids) if i is not None]
+    if not valid_ids:
+        return {}
+    rows = (
+        db.query(MeasurementModel)
+        .filter(MeasurementModel.tenant_id == tenant_id, MeasurementModel.id_measurement.in_(valid_ids))
+        .all()
+    )
+    return serialize_measurements_map(rows)
 
 
 def _resolver_ou_criar_medicao(
@@ -158,7 +148,7 @@ def _resolver_ou_criar_medicao(
     dados_m = measurement_in or MeasurementCriar()
     nova_m = MeasurementModel(
         tenant_id=tenant_id,
-        datetime_measurement=dados_m.datetime_measurement or datetime.utcnow(),
+        datetime_measurement=dados_m.datetime_measurement or utcnow(),
         ph_measurement=dados_m.ph_measurement,
         o2_dissolved_measurement=dados_m.o2_dissolved_measurement,
         turbidity_measurement=dados_m.turbidity_measurement,
@@ -172,107 +162,128 @@ def _resolver_ou_criar_medicao(
     return nova_m
 
 
-def _obter_responsavel_padrao(db: Session, tenant_id: str, fallback: str = "Gestor Ambiental") -> str:
-    usuario = (
-        db.query(AppUserModel)
-        .filter(
-            AppUserModel.tenant_id == tenant_id,
-            AppUserModel.status_user == "active",
-        )
-        .first()
-    )
-    if usuario and usuario.name_user:
-        return usuario.name_user
-    return fallback
-
-
-def _gerar_codigos_unicos(db: Session, tenant_id: str) -> tuple[str, str]:
-    ocr_code = f"OCR-{random.randint(1000, 9999)}"
-    for _ in range(15):
-        cand = f"OCR-{random.randint(1000, 9999)}"
-        if not (
-            db.query(OccurrenceModel)
-            .filter(OccurrenceModel.tenant_id == tenant_id, OccurrenceModel.code_occurrence == cand)
-            .first()
-        ):
-            ocr_code = cand
-            break
-
-    al_code = f"AL-{random.randint(100, 999)}"
-    for _ in range(15):
-        cand = f"AL-{random.randint(100, 999)}"
-        if not (
-            db.query(AlertModel)
-            .filter(AlertModel.tenant_id == tenant_id, AlertModel.code_alert == cand)
-            .first()
-        ):
-            al_code = cand
-            break
-
-    return ocr_code, al_code
-
-
 # ==========================================
-# 1. RESUMO DO BALANÇO HÍDRICO E CONFORMIDADE
+# 1. RESUMO DO BALANÇO HÍDRICO E CONFORMIDADE (AGREGAÇÕES SQL PURAS)
 # ==========================================
 def calcular_resumo_ciclo_hidrico(db: Session, tenant_id: str) -> dict:
-    props = db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    sellers = db.query(WaterSellerModel).filter(WaterSellerModel.tenant_id == tenant_id).all()
-    regs = (
-        db.query(EnvironmentalRegulatorModel)
+    props_count = db.query(func.count(PropertyModel.id_property)).filter(PropertyModel.tenant_id == tenant_id).scalar() or 0
+    sellers_count = db.query(func.count(WaterSellerModel.id_seller)).filter(WaterSellerModel.tenant_id == tenant_id).scalar() or 0
+    regs_count = (
+        db.query(func.count(EnvironmentalRegulatorModel.id_regulator))
         .filter(EnvironmentalRegulatorModel.tenant_id == tenant_id)
-        .all()
+        .scalar()
+        or 0
     )
-    batches = db.query(WaterBatchModel).filter(WaterBatchModel.tenant_id == tenant_id).all()
-    areas = db.query(AreaOfDisposalModel).filter(AreaOfDisposalModel.tenant_id == tenant_id).all()
-    measurements = db.query(MeasurementModel).filter(MeasurementModel.tenant_id == tenant_id).all()
-    admissions = db.query(WaterAdmissionModel).filter(WaterAdmissionModel.tenant_id == tenant_id).all()
-    storages = db.query(WaterStorageModel).filter(WaterStorageModel.tenant_id == tenant_id).all()
-    disposals = db.query(WaterDisposalModel).filter(WaterDisposalModel.tenant_id == tenant_id).all()
+    batches_count = db.query(func.count(WaterBatchModel.id_batch)).filter(WaterBatchModel.tenant_id == tenant_id).scalar() or 0
 
-    total_adm = round(sum(float(a.volume_admitted or 0.0) for a in admissions), 2)
-    total_sto = round(sum(float(s.volume_stored or 0.0) for s in storages), 2)
-    total_dis = round(sum(float(d.volume_disposed or 0.0) for d in disposals), 2)
-    net_bal = round(total_adm - total_dis, 2)
-
-    validated_areas = sum(1 for a in areas if bool(a.is_validated_for_disposal))
-
-    def _avg(vals: list[float]) -> Optional[float]:
-        return round(sum(vals) / len(vals), 2) if vals else None
-
-    compliant_count = 0
-    for m in measurements:
-        _, ok = avaliar_qualidade_medicao(m)
-        if ok:
-            compliant_count += 1
-
-    compliance_pct = (
-        round((compliant_count / len(measurements)) * 100.0, 1) if measurements else None
+    areas_row = (
+        db.query(
+            func.count(AreaOfDisposalModel.id_disposal_area),
+            func.coalesce(
+                func.sum(case((AreaOfDisposalModel.is_validated_for_disposal == True, 1), else_=0)),  # noqa: E712
+                0,
+            ),
+        )
+        .filter(AreaOfDisposalModel.tenant_id == tenant_id)
+        .one()
     )
+    areas_count = int(areas_row[0] or 0)
+    validated_areas = int(areas_row[1] or 0)
+
+    adm_row = (
+        db.query(
+            func.count(WaterAdmissionModel.id_admission),
+            func.coalesce(func.sum(WaterAdmissionModel.volume_admitted), 0.0),
+        )
+        .filter(WaterAdmissionModel.tenant_id == tenant_id)
+        .one()
+    )
+    admissions_count = int(adm_row[0] or 0)
+    total_adm = round(float(adm_row[1] or 0.0), 2)
+
+    sto_row = (
+        db.query(
+            func.count(WaterStorageModel.id_storage),
+            func.coalesce(func.sum(WaterStorageModel.volume_stored), 0.0),
+        )
+        .filter(WaterStorageModel.tenant_id == tenant_id)
+        .one()
+    )
+    storages_count = int(sto_row[0] or 0)
+    total_sto = round(float(sto_row[1] or 0.0), 2)
+
+    dis_row = (
+        db.query(
+            func.count(WaterDisposalModel.id_disposal),
+            func.coalesce(func.sum(WaterDisposalModel.volume_disposed), 0.0),
+        )
+        .filter(WaterDisposalModel.tenant_id == tenant_id)
+        .one()
+    )
+    disposals_count = int(dis_row[0] or 0)
+    total_dis = round(float(dis_row[1] or 0.0), 2)
+
+    conama_case = case(
+        (
+            and_(
+                func.coalesce(MeasurementModel.ph_measurement, 7.0) >= CONAMA_THRESHOLDS["ph_min"],
+                func.coalesce(MeasurementModel.ph_measurement, 7.0) <= CONAMA_THRESHOLDS["ph_max"],
+                func.coalesce(MeasurementModel.o2_dissolved_measurement, 6.0) >= CONAMA_THRESHOLDS["od_min"],
+                func.coalesce(MeasurementModel.turbidity_measurement, 20.0) <= CONAMA_THRESHOLDS["turbidity_max"],
+                func.coalesce(MeasurementModel.bod_measurement, 15.0) <= CONAMA_THRESHOLDS["bod_max"],
+                func.coalesce(MeasurementModel.cod_measurement, 45.0) <= CONAMA_THRESHOLDS["cod_max"],
+            ),
+            1,
+        ),
+        else_=0,
+    )
+
+    meas_row = (
+        db.query(
+            func.count(MeasurementModel.id_measurement),
+            func.coalesce(func.sum(conama_case), 0),
+            func.avg(MeasurementModel.ph_measurement),
+            func.avg(MeasurementModel.o2_dissolved_measurement),
+            func.avg(MeasurementModel.turbidity_measurement),
+            func.avg(MeasurementModel.conductivity_measurement),
+            func.avg(MeasurementModel.bod_measurement),
+            func.avg(MeasurementModel.cod_measurement),
+            func.avg(MeasurementModel.nitrogen_phosphorus_measurement),
+        )
+        .filter(MeasurementModel.tenant_id == tenant_id)
+        .one()
+    )
+
+    meas_count = int(meas_row[0] or 0)
+    compliant_count = int(meas_row[1] or 0)
+    compliance_pct = round((compliant_count / meas_count) * 100.0, 1) if meas_count > 0 else None
+
+    def _round_opt(val) -> Optional[float]:
+        return round(float(val), 2) if val is not None else None
 
     return {
         "total_admitted_m3": total_adm,
         "total_stored_m3": total_sto,
         "total_disposed_m3": total_dis,
-        "net_balance_m3": net_bal,
-        "properties_count": len(props),
-        "sellers_count": len(sellers),
-        "regulators_count": len(regs),
-        "batches_count": len(batches),
-        "areas_count": len(areas),
+        "net_balance_m3": round(total_adm - total_dis, 2),
+        "properties_count": int(props_count),
+        "sellers_count": int(sellers_count),
+        "regulators_count": int(regs_count),
+        "batches_count": int(batches_count),
+        "areas_count": areas_count,
         "validated_areas_count": validated_areas,
-        "measurements_count": len(measurements),
-        "admissions_count": len(admissions),
-        "storages_count": len(storages),
-        "disposals_count": len(disposals),
+        "measurements_count": meas_count,
+        "admissions_count": admissions_count,
+        "storages_count": storages_count,
+        "disposals_count": disposals_count,
         "conama_compliance_pct": compliance_pct,
-        "avg_ph": _avg([float(m.ph_measurement) for m in measurements if m.ph_measurement is not None]),
-        "avg_od": _avg([float(m.o2_dissolved_measurement) for m in measurements if m.o2_dissolved_measurement is not None]),
-        "avg_turbidity": _avg([float(m.turbidity_measurement) for m in measurements if m.turbidity_measurement is not None]),
-        "avg_conductivity": _avg([float(m.conductivity_measurement) for m in measurements if m.conductivity_measurement is not None]),
-        "avg_bod": _avg([float(m.bod_measurement) for m in measurements if m.bod_measurement is not None]),
-        "avg_cod": _avg([float(m.cod_measurement) for m in measurements if m.cod_measurement is not None]),
-        "avg_npk": _avg([float(m.nitrogen_phosphorus_measurement) for m in measurements if m.nitrogen_phosphorus_measurement is not None]),
+        "avg_ph": _round_opt(meas_row[2]),
+        "avg_od": _round_opt(meas_row[3]),
+        "avg_turbidity": _round_opt(meas_row[4]),
+        "avg_conductivity": _round_opt(meas_row[5]),
+        "avg_bod": _round_opt(meas_row[6]),
+        "avg_cod": _round_opt(meas_row[7]),
+        "avg_npk": _round_opt(meas_row[8]),
     }
 
 
@@ -332,9 +343,9 @@ def excluir_propriedade(
         raise HTTPException(status_code=404, detail="Propriedade não encontrada.")
 
     em_uso = (
-        db.query(WaterBatchModel).filter(WaterBatchModel.id_property == id_property, WaterBatchModel.tenant_id == tenant_id).first()
-        or db.query(AreaOfDisposalModel).filter(AreaOfDisposalModel.id_property == id_property, AreaOfDisposalModel.tenant_id == tenant_id).first()
-        or db.query(WaterStorageModel).filter(WaterStorageModel.id_property == id_property, WaterStorageModel.tenant_id == tenant_id).first()
+        db.query(WaterBatchModel.id_batch).filter(WaterBatchModel.id_property == id_property, WaterBatchModel.tenant_id == tenant_id).first()
+        or db.query(AreaOfDisposalModel.id_disposal_area).filter(AreaOfDisposalModel.id_property == id_property, AreaOfDisposalModel.tenant_id == tenant_id).first()
+        or db.query(WaterStorageModel.id_storage).filter(WaterStorageModel.id_property == id_property, WaterStorageModel.tenant_id == tenant_id).first()
     )
     if em_uso:
         raise HTTPException(
@@ -396,15 +407,12 @@ def excluir_fornecedor(
         raise HTTPException(status_code=404, detail="Fornecedor não encontrado.")
 
     em_uso = (
-        db.query(WaterBatchModel)
+        db.query(WaterBatchModel.id_batch)
         .filter(WaterBatchModel.id_seller == id_seller, WaterBatchModel.tenant_id == tenant_id)
         .first()
     )
     if em_uso:
-        raise HTTPException(
-            status_code=400,
-            detail="Fornecedor vinculado a lotes hídricos existentes.",
-        )
+        raise HTTPException(status_code=400, detail="Fornecedor vinculado a lotes hídricos existentes.")
 
     db.delete(fornecedor)
     db.commit()
@@ -462,7 +470,7 @@ def excluir_regulador(
         raise HTTPException(status_code=404, detail="Órgão regulador não encontrado.")
 
     em_uso = (
-        db.query(AreaOfDisposalModel)
+        db.query(AreaOfDisposalModel.id_disposal_area)
         .filter(
             AreaOfDisposalModel.id_regulator == id_regulator,
             AreaOfDisposalModel.tenant_id == tenant_id,
@@ -470,10 +478,7 @@ def excluir_regulador(
         .first()
     )
     if em_uso:
-        raise HTTPException(
-            status_code=400,
-            detail="Órgão regulador vinculado a áreas de descarte cadastradas.",
-        )
+        raise HTTPException(status_code=400, detail="Órgão regulador vinculado a áreas de descarte cadastradas.")
 
     db.delete(reg)
     db.commit()
@@ -485,8 +490,8 @@ def excluir_regulador(
 # ==========================================
 def _montar_area_resposta(
     area: AreaOfDisposalModel,
-    props_map: dict[int, PropertyModel],
-    regs_map: dict[int, EnvironmentalRegulatorModel],
+    props_map: Dict[int, PropertyModel],
+    regs_map: Dict[int, EnvironmentalRegulatorModel],
 ) -> dict:
     prop = props_map.get(area.id_property) if area.id_property else None
     reg = regs_map.get(area.id_regulator) if area.id_regulator else None
@@ -494,8 +499,8 @@ def _montar_area_resposta(
         "id_disposal_area": area.id_disposal_area,
         "id_property": area.id_property,
         "property_label": format_property_label(prop) if prop else None,
-        "x_coordinate": float(area.x_coordinate or 50.0),
-        "y_coordinate": float(area.y_coordinate or 50.0),
+        "x_coordinate": float(area.x_coordinate if area.x_coordinate is not None else 50.0),
+        "y_coordinate": float(area.y_coordinate if area.y_coordinate is not None else 50.0),
         "is_validated_for_disposal": bool(area.is_validated_for_disposal),
         "license_number_disposal": area.license_number_disposal,
         "id_regulator": area.id_regulator,
@@ -515,16 +520,11 @@ def listar_areas_descarte(
         .order_by(AreaOfDisposalModel.id_disposal_area.desc())
         .all()
     )
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
-    regs_map = {
-        r.id_regulator: r
-        for r in db.query(EnvironmentalRegulatorModel)
-        .filter(EnvironmentalRegulatorModel.tenant_id == tenant_id)
-        .all()
-    }
+    if not areas:
+        return []
+
+    props_map = _load_properties_by_ids(db, tenant_id, (a.id_property for a in areas))
+    regs_map = _load_regulators_by_ids(db, tenant_id, (a.id_regulator for a in areas))
     return [_montar_area_resposta(a, props_map, regs_map) for a in areas]
 
 
@@ -565,11 +565,7 @@ def criar_area_descarte(
     db.add(nova_area)
     db.commit()
     db.refresh(nova_area)
-    return _montar_area_resposta(
-        nova_area,
-        {prop.id_property: prop},
-        {reg.id_regulator: reg},
-    )
+    return _montar_area_resposta(nova_area, {prop.id_property: prop}, {reg.id_regulator: reg})
 
 
 @router.put("/areas-descarte/{id_disposal_area}", response_model=AreaOfDisposalResposta)
@@ -592,28 +588,35 @@ def atualizar_area_descarte(
 
     payload = dados.model_dump(exclude_unset=True)
     if "id_property" in payload and payload["id_property"] is not None:
-        prop = (
-            db.query(PropertyModel)
+        prop_chk = (
+            db.query(PropertyModel.id_property)
             .filter(
                 PropertyModel.id_property == payload["id_property"],
                 PropertyModel.tenant_id == tenant_id,
             )
             .first()
         )
-        if not prop:
+        if not prop_chk:
             raise HTTPException(status_code=404, detail="Propriedade não encontrada.")
 
     if "id_regulator" in payload and payload["id_regulator"] is not None:
-        reg = (
-            db.query(EnvironmentalRegulatorModel)
+        reg_chk = (
+            db.query(EnvironmentalRegulatorModel.id_regulator)
             .filter(
                 EnvironmentalRegulatorModel.id_regulator == payload["id_regulator"],
                 EnvironmentalRegulatorModel.tenant_id == tenant_id,
             )
             .first()
         )
-        if not reg:
+        if not reg_chk:
             raise HTTPException(status_code=404, detail="Órgão regulador não encontrado.")
+
+    if "x_coordinate" in payload and payload["x_coordinate"] is not None:
+        payload["x_coordinate"] = max(2.0, min(98.0, float(payload["x_coordinate"])))
+    if "y_coordinate" in payload and payload["y_coordinate"] is not None:
+        payload["y_coordinate"] = max(2.0, min(98.0, float(payload["y_coordinate"])))
+    if "license_number_disposal" in payload:
+        payload["license_number_disposal"] = (payload["license_number_disposal"] or "").strip() or None
 
     for campo, valor in payload.items():
         setattr(area, campo, valor)
@@ -621,16 +624,8 @@ def atualizar_area_descarte(
     db.commit()
     db.refresh(area)
 
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
-    regs_map = {
-        r.id_regulator: r
-        for r in db.query(EnvironmentalRegulatorModel)
-        .filter(EnvironmentalRegulatorModel.tenant_id == tenant_id)
-        .all()
-    }
+    props_map = _load_properties_by_ids(db, tenant_id, [area.id_property])
+    regs_map = _load_regulators_by_ids(db, tenant_id, [area.id_regulator])
     return _montar_area_resposta(area, props_map, regs_map)
 
 
@@ -652,7 +647,7 @@ def excluir_area_descarte(
         raise HTTPException(status_code=404, detail="Área de descarte não encontrada.")
 
     em_uso = (
-        db.query(WaterDisposalModel)
+        db.query(WaterDisposalModel.id_disposal)
         .filter(
             WaterDisposalModel.id_disposal_area == id_disposal_area,
             WaterDisposalModel.tenant_id == tenant_id,
@@ -671,7 +666,7 @@ def excluir_area_descarte(
 
 
 # ==========================================
-# 6. LAUDOS LABORATORIAIS (Measurement) + IA (.pkl)
+# 6. LAUDOS LABORATORIAIS (Measurement) + IA EM LOTE
 # ==========================================
 @router.get("/medicoes-laboratoriais", response_model=List[MeasurementResposta])
 def listar_medicoes_laboratoriais(
@@ -684,7 +679,10 @@ def listar_medicoes_laboratoriais(
         .order_by(MeasurementModel.id_measurement.desc())
         .all()
     )
-    return [serialize_measurement(m) for m in medicoes]
+    if not medicoes:
+        return []
+    mapa_serializado = serialize_measurements_map(medicoes)
+    return [mapa_serializado[m.id_measurement] for m in medicoes]
 
 
 @router.post("/medicoes-laboratoriais", response_model=MeasurementResposta, status_code=status.HTTP_201_CREATED)
@@ -697,8 +695,8 @@ def criar_medicao_laboratorial(
     nova = _resolver_ou_criar_medicao(db, tenant_id, None, dados)
     ml_status, conama_ok = avaliar_qualidade_medicao(nova)
 
-    severidade_hist = "normal" if conama_ok else "critico"
-    evento = HistoryEventModel(
+    registrar_evento_historico(
+        db=db,
         tenant_id=tenant_id,
         event_type="medicao",
         event_label="Laudo Físico-Químico Laboratorial",
@@ -708,12 +706,11 @@ def criar_medicao_laboratorial(
             f"DBO {nova.bod_measurement:.1f} mg/L, DQO {nova.cod_measurement:.1f} mg/L, "
             f"NPK {nova.nitrogen_phosphorus_measurement:.1f} mg/L — Classificação IA: {ml_status}."
         ),
-        event_severity=severidade_hist,
+        event_severity="normal" if conama_ok else "critico",
         id_reference=nova.id_measurement,
         reference_type="measurement",
         created_by=ctx.name or ctx.email or "Laboratório",
     )
-    db.add(evento)
     db.commit()
     db.refresh(nova)
     return serialize_measurement(nova)
@@ -733,14 +730,11 @@ def listar_lotes(
         .order_by(WaterBatchModel.id_batch.desc())
         .all()
     )
-    sellers_map = {
-        s.id_seller: s
-        for s in db.query(WaterSellerModel).filter(WaterSellerModel.tenant_id == tenant_id).all()
-    }
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
+    if not lotes:
+        return []
+
+    sellers_map = _load_sellers_by_ids(db, tenant_id, (lt.id_seller for lt in lotes))
+    props_map = _load_properties_by_ids(db, tenant_id, (lt.id_property for lt in lotes))
 
     saida = []
     for lt in lotes:
@@ -786,7 +780,7 @@ def criar_lote(
         tenant_id=tenant_id,
         id_seller=sel.id_seller,
         id_property=prop.id_property,
-        datetime_batch_creation=dados.datetime_batch_creation or datetime.utcnow(),
+        datetime_batch_creation=dados.datetime_batch_creation or utcnow(),
     )
     db.add(novo)
     db.commit()
@@ -817,7 +811,7 @@ def excluir_lote(
         raise HTTPException(status_code=404, detail="Lote não encontrado.")
 
     em_uso = (
-        db.query(WaterAdmissionModel)
+        db.query(WaterAdmissionModel.id_admission)
         .filter(WaterAdmissionModel.id_batch == id_batch, WaterAdmissionModel.tenant_id == tenant_id)
         .first()
     )
@@ -843,22 +837,23 @@ def listar_admissoes(
         .order_by(WaterAdmissionModel.id_admission.desc())
         .all()
     )
-    batches_map = {
-        b.id_batch: b
-        for b in db.query(WaterBatchModel).filter(WaterBatchModel.tenant_id == tenant_id).all()
-    }
-    sellers_map = {
-        s.id_seller: s
-        for s in db.query(WaterSellerModel).filter(WaterSellerModel.tenant_id == tenant_id).all()
-    }
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
-    meas_map = {
-        m.id_measurement: m
-        for m in db.query(MeasurementModel).filter(MeasurementModel.tenant_id == tenant_id).all()
-    }
+    if not admissoes:
+        return []
+
+    batch_ids = [a.id_batch for a in admissoes if a.id_batch is not None]
+    batches_map = (
+        {
+            b.id_batch: b
+            for b in db.query(WaterBatchModel)
+            .filter(WaterBatchModel.tenant_id == tenant_id, WaterBatchModel.id_batch.in_(batch_ids))
+            .all()
+        }
+        if batch_ids
+        else {}
+    )
+    sellers_map = _load_sellers_by_ids(db, tenant_id, (b.id_seller for b in batches_map.values()))
+    props_map = _load_properties_by_ids(db, tenant_id, (b.id_property for b in batches_map.values()))
+    meas_serialized = _load_serialized_measurements_by_ids(db, tenant_id, (a.id_measurement for a in admissoes))
 
     saida = []
     for adm in admissoes:
@@ -870,7 +865,6 @@ def listar_admissoes(
             if bt
             else f"Lote #{adm.id_batch}"
         )
-        m_obj = meas_map.get(adm.id_measurement) if adm.id_measurement else None
         saida.append(
             {
                 "id_admission": adm.id_admission,
@@ -878,7 +872,7 @@ def listar_admissoes(
                 "batch_label": batch_lbl,
                 "volume_admitted": float(adm.volume_admitted or 0.0),
                 "id_measurement": adm.id_measurement,
-                "measurement": serialize_measurement(m_obj),
+                "measurement": meas_serialized.get(adm.id_measurement) if adm.id_measurement else None,
             }
         )
     return saida
@@ -911,19 +905,12 @@ def criar_admissao(
     db.add(nova_adm)
     db.flush()
 
-    sel = (
-        db.query(WaterSellerModel)
-        .filter(WaterSellerModel.id_seller == lote.id_seller, WaterSellerModel.tenant_id == tenant_id)
-        .first()
-    )
-    prop = (
-        db.query(PropertyModel)
-        .filter(PropertyModel.id_property == lote.id_property, PropertyModel.tenant_id == tenant_id)
-        .first()
-    )
+    sel = _load_sellers_by_ids(db, tenant_id, [lote.id_seller]).get(lote.id_seller) if lote.id_seller else None
+    prop = _load_properties_by_ids(db, tenant_id, [lote.id_property]).get(lote.id_property) if lote.id_property else None
     batch_lbl = f"Lote #{lote.id_batch} · {sel.name_seller if sel else 'Origem'} → {prop.property_address if prop else 'Unidade'}"
 
-    evento = HistoryEventModel(
+    registrar_evento_historico(
+        db=db,
         tenant_id=tenant_id,
         event_type="medicao",
         event_label="Admissão de Lote Hídrico",
@@ -937,7 +924,6 @@ def criar_admissao(
         reference_type="water_admission",
         created_by=ctx.name or ctx.email or "Operação Hídrica",
     )
-    db.add(evento)
     db.commit()
     db.refresh(nova_adm)
 
@@ -986,14 +972,11 @@ def listar_armazenamentos(
         .order_by(WaterStorageModel.id_storage.desc())
         .all()
     )
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
-    meas_map = {
-        m.id_measurement: m
-        for m in db.query(MeasurementModel).filter(MeasurementModel.tenant_id == tenant_id).all()
-    }
+    if not registros:
+        return []
+
+    props_map = _load_properties_by_ids(db, tenant_id, (st.id_property for st in registros))
+    meas_serialized = _load_serialized_measurements_by_ids(db, tenant_id, (st.id_measurement for st in registros))
 
     return [
         {
@@ -1002,7 +985,7 @@ def listar_armazenamentos(
             "property_label": format_property_label(props_map.get(st.id_property)) if st.id_property else None,
             "volume_stored": float(st.volume_stored or 0.0),
             "id_measurement": st.id_measurement,
-            "measurement": serialize_measurement(meas_map.get(st.id_measurement)) if st.id_measurement else None,
+            "measurement": meas_serialized.get(st.id_measurement) if st.id_measurement else None,
         }
         for st in registros
     ]
@@ -1035,7 +1018,8 @@ def criar_armazenamento(
     db.add(novo_st)
     db.flush()
 
-    evento = HistoryEventModel(
+    registrar_evento_historico(
+        db=db,
         tenant_id=tenant_id,
         event_type="providencia",
         event_label="Controle de Armazenamento Hídrico",
@@ -1050,7 +1034,6 @@ def criar_armazenamento(
         reference_type="water_storage",
         created_by=ctx.name or ctx.email or "Operação Hídrica",
     )
-    db.add(evento)
     db.commit()
     db.refresh(novo_st)
 
@@ -1096,18 +1079,22 @@ def listar_descartes(
         .order_by(WaterDisposalModel.id_disposal.desc())
         .all()
     )
-    areas_map = {
-        a.id_disposal_area: a
-        for a in db.query(AreaOfDisposalModel).filter(AreaOfDisposalModel.tenant_id == tenant_id).all()
-    }
-    props_map = {
-        p.id_property: p
-        for p in db.query(PropertyModel).filter(PropertyModel.tenant_id == tenant_id).all()
-    }
-    meas_map = {
-        m.id_measurement: m
-        for m in db.query(MeasurementModel).filter(MeasurementModel.tenant_id == tenant_id).all()
-    }
+    if not registros:
+        return []
+
+    area_ids = [d.id_disposal_area for d in registros if d.id_disposal_area is not None]
+    areas_map = (
+        {
+            a.id_disposal_area: a
+            for a in db.query(AreaOfDisposalModel)
+            .filter(AreaOfDisposalModel.tenant_id == tenant_id, AreaOfDisposalModel.id_disposal_area.in_(area_ids))
+            .all()
+        }
+        if area_ids
+        else {}
+    )
+    props_map = _load_properties_by_ids(db, tenant_id, (a.id_property for a in areas_map.values()))
+    meas_serialized = _load_serialized_measurements_by_ids(db, tenant_id, (d.id_measurement for d in registros))
 
     saida = []
     for d in registros:
@@ -1123,7 +1110,7 @@ def listar_descartes(
                 "is_area_validated": bool(area.is_validated_for_disposal) if area else False,
                 "volume_disposed": float(d.volume_disposed or 0.0),
                 "id_measurement": d.id_measurement,
-                "measurement": serialize_measurement(meas_map.get(d.id_measurement)) if d.id_measurement else None,
+                "measurement": meas_serialized.get(d.id_measurement) if d.id_measurement else None,
                 "generated_alert_code": None,
                 "generated_occurrence_code": None,
             }
@@ -1149,19 +1136,8 @@ def criar_descarte(
     if not area:
         raise HTTPException(status_code=404, detail="Área de descarte não encontrada nesta conta.")
 
-    prop = (
-        db.query(PropertyModel)
-        .filter(PropertyModel.id_property == area.id_property, PropertyModel.tenant_id == tenant_id)
-        .first()
-    )
-    reg = (
-        db.query(EnvironmentalRegulatorModel)
-        .filter(
-            EnvironmentalRegulatorModel.id_regulator == area.id_regulator,
-            EnvironmentalRegulatorModel.tenant_id == tenant_id,
-        )
-        .first()
-    )
+    prop = _load_properties_by_ids(db, tenant_id, [area.id_property]).get(area.id_property) if area.id_property else None
+    reg = _load_regulators_by_ids(db, tenant_id, [area.id_regulator]).get(area.id_regulator) if area.id_regulator else None
 
     medicao = _resolver_ou_criar_medicao(db, tenant_id, dados.id_measurement, dados.measurement)
     ml_status, conama_ok = avaliar_qualidade_medicao(medicao)
@@ -1181,7 +1157,6 @@ def criar_descarte(
     generated_alert_code = None
     generated_occ_code = None
 
-    # Fiscalização automática: área sem homologação ambiental OU laudo reprovado pela IA / CONAMA
     irregularidades = []
     if not bool(area.is_validated_for_disposal):
         irregularidades.append(
@@ -1194,28 +1169,13 @@ def criar_descarte(
         )
 
     if irregularidades:
-        ocr_code, al_code = _gerar_codigos_unicos(db, tenant_id)
-        responsavel = _obter_responsavel_padrao(db, tenant_id, fallback=ctx.name or "Gestor Ambiental")
+        responsavel = obter_responsavel_tenant(db, tenant_id, fallback=ctx.name or "Gestor Ambiental")
         metricas_ocr = (
             f"VOL: {novo_desc.volume_disposed:.0f} m³ | "
             f"PH: {medicao.ph_measurement:.1f} | "
             f"DBO: {medicao.bod_measurement:.1f} mg/L | "
             f"DQO: {medicao.cod_measurement:.1f} mg/L"
         )
-
-        nova_ocr = OccurrenceModel(
-            tenant_id=tenant_id,
-            code_occurrence=ocr_code,
-            title_occurrence=f"Descarte Irregular / Não Conforme — {lic_str}",
-            location_occurrence=area_lbl,
-            responsible_occurrence=responsavel,
-            metrics_occurrence=metricas_ocr,
-            status_occurrence="analise",
-            risk_occurrence="critico",
-        )
-        db.add(nova_ocr)
-        db.flush()
-
         params_chips = [
             f"Volume: {novo_desc.volume_disposed:.0f} m³",
             f"pH: {medicao.ph_measurement:.1f}",
@@ -1224,45 +1184,34 @@ def criar_descarte(
             f"Licença: {'Validada' if area.is_validated_for_disposal else 'Pendente'}",
         ]
 
-        novo_alerta = AlertModel(
+        nova_ocr, novo_alerta, _ = registrar_incidente_critico(
+            db=db,
             tenant_id=tenant_id,
-            code_alert=al_code,
+            occurrence_title=f"Descarte Irregular / Não Conforme — {lic_str}",
+            location_label=area_lbl,
             point_name=area_lbl,
-            severity="critical",
-            status="active",
-            message=" | ".join(irregularidades),
-            params_json=json.dumps(params_chips, ensure_ascii=False),
+            responsible=responsavel,
+            metrics_summary=metricas_ocr,
+            alert_message=" | ".join(irregularidades),
+            params_chips=params_chips,
             recommendation=(
                 "Suspender fertirrigação/descarte imediatamente no talhão, redirecionar o lote para bacia de "
                 "estabilização (Water_Storage) e regularizar outorga/neutralização antes de nova aplicação."
             ),
-            responsible=responsavel,
-            id_occurrence=nova_ocr.id_occurrence,
-            code_occurrence=ocr_code,
-            is_viewed=0,
-        )
-        db.add(novo_alerta)
-
-        evento_crit = HistoryEventModel(
-            tenant_id=tenant_id,
-            event_type="alerta",
-            event_label="Não Conformidade em Descarte Hídrico",
-            event_point=area_lbl,
-            event_description=(
+            history_label="Não Conformidade em Descarte Hídrico",
+            history_description_prefix=(
                 f"Descarte de {novo_desc.volume_disposed:.0f} m³ acionou fiscalização automática: "
-                f"{'; '.join(irregularidades)}. Gerados Alerta #{al_code} e Ocorrência #{ocr_code}."
+                f"{'; '.join(irregularidades)}."
             ),
-            event_severity="critico",
             id_reference=novo_desc.id_disposal,
             reference_type="water_disposal",
             created_by=ctx.name or ctx.email or "Fiscalização Automática",
         )
-        db.add(evento_crit)
-
-        generated_alert_code = al_code
-        generated_occ_code = ocr_code
+        generated_alert_code = novo_alerta.code_alert
+        generated_occ_code = nova_ocr.code_occurrence
     else:
-        evento_ok = HistoryEventModel(
+        registrar_evento_historico(
+            db=db,
             tenant_id=tenant_id,
             event_type="providencia",
             event_label="Descarte / Fertirrigação Homologada",
@@ -1276,7 +1225,6 @@ def criar_descarte(
             reference_type="water_disposal",
             created_by=ctx.name or ctx.email or "Operação Hídrica",
         )
-        db.add(evento_ok)
 
     db.commit()
     db.refresh(novo_desc)
@@ -1316,7 +1264,7 @@ def excluir_descarte(
 
 
 # ==========================================
-# 11. CARGA INICIAL DE DEMONSTRAÇÃO AGROINDUSTRIAL (OPCIONAL POR BOTÃO)
+# 11. CARGA INICIAL DE DEMONSTRAÇÃO AGROINDUSTRIAL
 # ==========================================
 @router.post("/seed-exemplo", summary="Popular registros iniciais de demonstração nas 9 tabelas do Ciclo Hídrico")
 def popular_dados_exemplo(
@@ -1324,8 +1272,8 @@ def popular_dados_exemplo(
     db: Session = Depends(get_db),
 ):
     tenant_id = ctx.tenant_id
+    agora = utcnow()
 
-    # Cria registros realistas do setor sucroenergético exclusivamente para este tenant
     p_norte = PropertyModel(
         tenant_id=tenant_id,
         property_address="Cooperativa Vale Verde — Unidade Norte (Fazenda Santa Elisa)",
@@ -1389,13 +1337,13 @@ def popular_dados_exemplo(
         tenant_id=tenant_id,
         id_seller=s1.id_seller,
         id_property=p_norte.id_property,
-        datetime_batch_creation=datetime.utcnow(),
+        datetime_batch_creation=agora,
     )
     lote_2 = WaterBatchModel(
         tenant_id=tenant_id,
         id_seller=s2.id_seller,
         id_property=p_sul.id_property,
-        datetime_batch_creation=datetime.utcnow(),
+        datetime_batch_creation=agora,
     )
     db.add_all([lote_1, lote_2])
 
@@ -1432,27 +1380,31 @@ def popular_dados_exemplo(
     db.add_all([m_adm, m_sto, m_dis])
     db.flush()
 
-    adm = WaterAdmissionModel(
-        tenant_id=tenant_id,
-        id_batch=lote_1.id_batch,
-        volume_admitted=3200.0,
-        id_measurement=m_adm.id_measurement,
+    db.add_all(
+        [
+            WaterAdmissionModel(
+                tenant_id=tenant_id,
+                id_batch=lote_1.id_batch,
+                volume_admitted=3200.0,
+                id_measurement=m_adm.id_measurement,
+            ),
+            WaterStorageModel(
+                tenant_id=tenant_id,
+                id_property=p_norte.id_property,
+                volume_stored=1850.0,
+                id_measurement=m_sto.id_measurement,
+            ),
+            WaterDisposalModel(
+                tenant_id=tenant_id,
+                id_disposal_area=area_ok.id_disposal_area,
+                volume_disposed=1350.0,
+                id_measurement=m_dis.id_measurement,
+            ),
+        ]
     )
-    sto = WaterStorageModel(
-        tenant_id=tenant_id,
-        id_property=p_norte.id_property,
-        volume_stored=1850.0,
-        id_measurement=m_sto.id_measurement,
-    )
-    dis = WaterDisposalModel(
-        tenant_id=tenant_id,
-        id_disposal_area=area_ok.id_disposal_area,
-        volume_disposed=1350.0,
-        id_measurement=m_dis.id_measurement,
-    )
-    db.add_all([adm, sto, dis])
 
-    ev = HistoryEventModel(
+    registrar_evento_historico(
+        db=db,
         tenant_id=tenant_id,
         event_type="providencia",
         event_label="Ciclo Hídrico Inicializado",
@@ -1463,8 +1415,8 @@ def popular_dados_exemplo(
         ),
         event_severity="normal",
         created_by=ctx.name or ctx.email or "Sistema",
+        datetime_history=agora,
     )
-    db.add(ev)
     db.commit()
 
     return {

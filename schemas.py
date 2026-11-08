@@ -1,31 +1,11 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+"""
+Contratos e Schemas Pydantic v2 — Plataforma Cana.
+"""
+
 from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, ConfigDict
 
-# ==========================================
-# ESQUEMAS / CONTRATOS (Pydantic)
-# ==========================================
-class TarefaBase(BaseModel):
-    titulo: str = Field(..., min_length=3, max_length=100)
-    descricao: Optional[str] = Field(None, max_length=300)
-    concluida: bool = Field(default=False)
-
-class TarefaCriar(TarefaBase):
-    cep: Optional[str] = Field(None, json_schema_extra={"example": "01001000"}, description="CEP para buscar o endereço da tarefa")
-
-class TarefaAtualizar(BaseModel):
-    titulo: Optional[str] = Field(None, min_length=3, max_length=100)
-    descricao: Optional[str] = Field(None, max_length=300)
-    concluida: Optional[bool] = None
-
-class TarefaResposta(TarefaBase):
-    id: int
-
-class DadosAgua(BaseModel):
-    ph: float = Field(..., json_schema_extra={"example": 6.5}, description="Nível de pH da água")
-    temperatura_c: float = Field(..., json_schema_extra={"example": 25.0}, description="Temperatura em graus Celsius")
-    dbo_mgl: float = Field(..., json_schema_extra={"example": 10.0}, description="Demanda Biológica de Oxigênio")
-    turbidez_ntu: float = Field(..., json_schema_extra={"example": 15.0}, description="Nível de Turbidez")
 
 # ==========================================
 # SCHEMAS DE OCORRÊNCIA
@@ -39,8 +19,10 @@ class OcorrenciaBase(BaseModel):
     risk_occurrence: str = "medio"
     code_occurrence: Optional[str] = None
 
+
 class OcorrenciaCriar(OcorrenciaBase):
     pass
+
 
 class OcorrenciaAtualizar(BaseModel):
     title_occurrence: Optional[str] = None
@@ -50,12 +32,13 @@ class OcorrenciaAtualizar(BaseModel):
     status_occurrence: Optional[str] = None
     risk_occurrence: Optional[str] = None
 
+
 class OcorrenciaResposta(OcorrenciaBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id_occurrence: int
     datetime_occurrence_creation: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True  # Permite serializar o modelo SQLAlchemy diretamente
 
 # ==========================================
 # SCHEMAS DE USUÁRIO
@@ -63,12 +46,14 @@ class OcorrenciaResposta(OcorrenciaBase):
 class UserBase(BaseModel):
     name_user: str
     email_user: str
-    role_user: str = 'Operador'
+    role_user: str = "Operador"
     responsible_point_user: str
-    status_user: str = 'active'
+    status_user: str = "active"
+
 
 class UserCriar(UserBase):
     pass
+
 
 class UserAtualizar(BaseModel):
     name_user: Optional[str] = None
@@ -77,17 +62,22 @@ class UserAtualizar(BaseModel):
     responsible_point_user: Optional[str] = None
     status_user: Optional[str] = None
 
+
 class UserResposta(UserBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id_user: int
     last_access_datetime: Optional[datetime] = None
     datetime_user_creation: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
 # ==========================================
-# SCHEMAS DE MAPA
+# SCHEMAS DE MAPA E TELEMETRIA
 # ==========================================
+class TelemetriaToggleRequest(BaseModel):
+    active: bool
+
+
 class MapBase(BaseModel):
     code_map_point: str
     name_map_point: str
@@ -95,14 +85,16 @@ class MapBase(BaseModel):
     geo_coordinate_map_point: Optional[str] = None
     pos_x_map_point: float
     pos_y_map_point: float
-    ph_map_point: float = 7.0
+    ph_map_point: float = 7.2
     turbidity_map_point: float = 20.0
-    contaminant_map_point: float = 0.0
-    volume_map_point: float = 4000.0
+    contaminant_map_point: float = 0.6
+    volume_map_point: float = 2800.0
     risk_map_point: str = "low"
+
 
 class MapCriar(MapBase):
     pass
+
 
 class MapAtualizar(BaseModel):
     code_map_point: Optional[str] = None
@@ -117,15 +109,18 @@ class MapAtualizar(BaseModel):
     volume_map_point: Optional[float] = None
     risk_map_point: Optional[str] = None
 
+
 class MapResposta(MapBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id_map_point: int
     datetime_map_point_creation: Optional[datetime] = None
     datetime_map_point_update: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
 class MapMeasurementHistoryResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_measurement: int
     code_map_point: str
     name_map_point: str
@@ -136,32 +131,27 @@ class MapMeasurementHistoryResposta(BaseModel):
     risk: str
     recorded_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 # ==========================================
 # SCHEMAS DE HISTÓRICO
 # ==========================================
 class HistoryEventBase(BaseModel):
-    event_type: str  # 'medicao', 'providencia', 'ocorrencia', 'alerta'
+    event_type: str
     event_label: str
     event_point: str
     event_description: str
-    event_severity: str = "normal"  # 'normal', 'medio', 'critico'
+    event_severity: str = "normal"
     id_reference: Optional[int] = None
     reference_type: Optional[str] = None
     created_by: Optional[str] = None
 
-class HistoryEventCriar(HistoryEventBase):
-    pass
 
 class HistoryEventResposta(HistoryEventBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id_history: int
     datetime_history: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
 # ==========================================
 # SCHEMAS DE INTELIGÊNCIA ARTIFICIAL (GROQ)
@@ -175,14 +165,16 @@ class AISimulationRequest(BaseModel):
     calculated_score: Optional[int] = None
     calculated_risk: Optional[str] = None
 
+
 class AISimulationResponse(BaseModel):
-    risk_level: str               # "Baixo", "Médio" ou "Crítico"
-    risk_score_evaluation: str   # Resumo da avaliação numérica
-    summary: str                 # Análise técnica resumida
-    technical_considerations: str # Considerações técnicas no contexto sucroalcooleiro
-    recommendations: List[str]   # Lista de ações recomendadas
-    alerts_suggested: List[str]  # Alertas sugeridos pela IA
+    risk_level: str
+    risk_score_evaluation: str
+    summary: str
+    technical_considerations: str
+    recommendations: List[str]
+    alerts_suggested: List[str]
     model_used: str
+
 
 class AIDailyAnalysisResponse(BaseModel):
     analysis_date: str
@@ -196,22 +188,13 @@ class AIDailyAnalysisResponse(BaseModel):
     generated_at: str
     model_used: str
 
-# ==========================================
-# SCHEMAS PARA ALERTAS (TELA DE ALERTAS & NOTIFICAÇÕES)
-# ==========================================
-class AlertCriar(BaseModel):
-    code_alert: Optional[str] = None
-    point_name: str
-    severity: str = "critical"
-    status: str = "active"
-    message: str
-    params: List[str] = []
-    recommendation: str
-    responsible: str = "Responsável Local"
-    id_occurrence: Optional[int] = None
-    code_occurrence: Optional[str] = None
 
+# ==========================================
+# SCHEMAS DE ALERTAS E CONFIGURAÇÕES DO TENANT
+# ==========================================
 class AlertResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_alert: int
     code_alert: str
     point_name: str
@@ -226,8 +209,21 @@ class AlertResposta(BaseModel):
     is_viewed: int
     datetime_alert: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+
+class NotificationSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    email_alerts: Optional[bool] = None
+    push_alerts: Optional[bool] = None
+    user_email: Optional[str] = None
+
+
+class GeneralSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    unit: Optional[str] = None
+    frequency: Optional[str | int] = None
+    timezone: Optional[str] = None
 
 
 # ==========================================
@@ -238,33 +234,33 @@ class WaterSellerCriar(BaseModel):
     name_seller: str
     license_number_seller: Optional[str] = None
 
-class WaterSellerResposta(WaterSellerCriar):
-    id_seller: int
 
-    class Config:
-        from_attributes = True
+class WaterSellerResposta(WaterSellerCriar):
+    model_config = ConfigDict(from_attributes=True)
+
+    id_seller: int
 
 
 class PropertyCriar(BaseModel):
     property_address: str
     property_city: str
 
-class PropertyResposta(PropertyCriar):
-    id_property: int
 
-    class Config:
-        from_attributes = True
+class PropertyResposta(PropertyCriar):
+    model_config = ConfigDict(from_attributes=True)
+
+    id_property: int
 
 
 class EnvironmentalRegulatorCriar(BaseModel):
     name_regulator: str
     jurisdiction_regulator: str
 
-class EnvironmentalRegulatorResposta(EnvironmentalRegulatorCriar):
-    id_regulator: int
 
-    class Config:
-        from_attributes = True
+class EnvironmentalRegulatorResposta(EnvironmentalRegulatorCriar):
+    model_config = ConfigDict(from_attributes=True)
+
+    id_regulator: int
 
 
 class MeasurementCriar(BaseModel):
@@ -277,7 +273,10 @@ class MeasurementCriar(BaseModel):
     nitrogen_phosphorus_measurement: float = 8.0
     datetime_measurement: Optional[datetime] = None
 
+
 class MeasurementResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_measurement: int
     datetime_measurement: Optional[datetime] = None
     ph_measurement: float
@@ -290,16 +289,16 @@ class MeasurementResposta(BaseModel):
     ml_status: str = "Própria"
     conama_compliant: bool = True
 
-    class Config:
-        from_attributes = True
-
 
 class WaterBatchCriar(BaseModel):
     id_seller: int
     id_property: int
     datetime_batch_creation: Optional[datetime] = None
 
+
 class WaterBatchResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_batch: int
     id_seller: Optional[int] = None
     id_property: Optional[int] = None
@@ -307,9 +306,6 @@ class WaterBatchResposta(BaseModel):
     seller_license: Optional[str] = None
     property_label: Optional[str] = None
     datetime_batch_creation: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class AreaOfDisposalCriar(BaseModel):
@@ -320,6 +316,7 @@ class AreaOfDisposalCriar(BaseModel):
     license_number_disposal: Optional[str] = None
     id_regulator: int
 
+
 class AreaOfDisposalAtualizar(BaseModel):
     id_property: Optional[int] = None
     x_coordinate: Optional[float] = None
@@ -328,7 +325,10 @@ class AreaOfDisposalAtualizar(BaseModel):
     license_number_disposal: Optional[str] = None
     id_regulator: Optional[int] = None
 
+
 class AreaOfDisposalResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_disposal_area: int
     id_property: Optional[int] = None
     property_label: Optional[str] = None
@@ -340,9 +340,6 @@ class AreaOfDisposalResposta(BaseModel):
     regulator_name: Optional[str] = None
     regulator_jurisdiction: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
 
 class WaterAdmissionCriar(BaseModel):
     id_batch: int
@@ -350,16 +347,16 @@ class WaterAdmissionCriar(BaseModel):
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 
+
 class WaterAdmissionResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_admission: int
     id_batch: Optional[int] = None
     batch_label: Optional[str] = None
     volume_admitted: float
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementResposta] = None
-
-    class Config:
-        from_attributes = True
 
 
 class WaterStorageCriar(BaseModel):
@@ -368,16 +365,16 @@ class WaterStorageCriar(BaseModel):
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 
+
 class WaterStorageResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_storage: int
     id_property: Optional[int] = None
     property_label: Optional[str] = None
     volume_stored: float
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementResposta] = None
-
-    class Config:
-        from_attributes = True
 
 
 class WaterDisposalCriar(BaseModel):
@@ -386,7 +383,10 @@ class WaterDisposalCriar(BaseModel):
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 
+
 class WaterDisposalResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_disposal: int
     id_disposal_area: Optional[int] = None
     disposal_area_label: Optional[str] = None
@@ -396,9 +396,6 @@ class WaterDisposalResposta(BaseModel):
     measurement: Optional[MeasurementResposta] = None
     generated_alert_code: Optional[str] = None
     generated_occurrence_code: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class WaterCycleSummaryResponse(BaseModel):

@@ -53,16 +53,29 @@ app = FastAPI(
     openapi_url=None if IS_PROD else "/openapi.json",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+def _get_cors_origins() -> list[str]:
+    default_origins = [
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:5500",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5500",
-    ],
+    ]
+    extra_raw = (os.getenv("CORS_ORIGINS") or "").strip()
+    if not extra_raw:
+        return default_origins
+    extra_list = [o.strip().rstrip("/") for o in extra_raw.split(",") if o.strip()]
+    return list(dict.fromkeys(default_origins + extra_list))
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_get_cors_origins(),
+    allow_origin_regex=os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"^https://.*\.(vercel\.app|netlify\.app|web\.app|firebaseapp\.com)$",
+    ),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
@@ -105,6 +118,11 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
     if IS_PROD:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+@app.get("/health", tags=["Healthcheck"], summary="Verificação de saúde para nuvem (Render / Koyeb / Docker)")
+def healthcheck():
+    return {"status": "ok", "service": "plataforma-cana-api"}
+
 
 # Registro exclusivo das rotas ativas da plataforma
 app.include_router(ocorrencias.router, prefix="/ocorrencias")

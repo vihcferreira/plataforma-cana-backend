@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: plataforma-cana-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENVIRONMENT
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        value: plataforma-efluentes-250eb
+      - key: REQUIRE_EMAIL_VERIFIED
+        value: "false"
+      - key: WATER_QUALITY_MODEL_SHA256
+        value: b679da26860f04e701b219b1c858f77640ffcf8b02eb15f8019aca7a8aacbb9c
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+

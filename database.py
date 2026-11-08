@@ -47,25 +47,47 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _resolve_database_url() -> str:
+def _resolve_database_url() -> tuple[str, bool]:
     env_url = (os.getenv("DATABASE_URL") or "").strip()
-    if env_url:
-        return env_url
-    if os.getenv("ENVIRONMENT", "development").lower() == "production":
-        raise RuntimeError("DATABASE_URL é obrigatória em ambiente de produção.")
-    logger.warning(
-        "[Security] DATABASE_URL ausente no ambiente; utilizando conexão local de desenvolvimento."
-    )
-    return "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
+    if not env_url:
+        if os.getenv("ENVIRONMENT", "development").lower() == "production":
+            raise RuntimeError("DATABASE_URL é obrigatória em ambiente de produção.")
+        logger.warning(
+            "[Security] DATABASE_URL ausente no ambiente; utilizando conexão local de desenvolvimento."
+        )
+        return "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4", False
+
+    # Converte automaticamente mysql:// (padrão Aiven/TiDB/Railway) para mysql+pymysql://
+    if env_url.startswith("mysql://"):
+        env_url = "mysql+pymysql://" + env_url[len("mysql://") :]
+
+    # Detecta necessidade de SSL (ex: ?ssl-mode=REQUIRED do Aiven ou ?ssl=true do TiDB Cloud)
+    needs_ssl = os.getenv("DB_SSL_REQUIRED", "false").lower() in ("1", "true", "yes")
+    if "ssl-mode=" in env_url or "ssl_mode=" in env_url or "ssl=true" in env_url:
+        needs_ssl = True
+        env_url = re.sub(r"([?&])(ssl-mode|ssl_mode|ssl)=[^&]*&?", r"\1", env_url).rstrip("?&")
+
+    return env_url, needs_ssl
 
 
-DATABASE_URL = _resolve_database_url()
+DATABASE_URL, _DB_NEEDS_SSL = _resolve_database_url()
+
+_connect_args: dict = {}
+if DATABASE_URL.startswith("mysql"):
+    _connect_args["connect_timeout"] = 10
+    if _DB_NEEDS_SSL:
+        import ssl
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        _connect_args["ssl"] = ssl_ctx
 
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    pool_recycle=3600,
-    connect_args={"connect_timeout": 3} if DATABASE_URL.startswith("mysql") else {},
+    pool_recycle=1800,
+    connect_args=_connect_args,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

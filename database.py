@@ -27,6 +27,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+try:
+    import pymysql
+
+    # Permite que o SQLAlchemy use o PyMySQL transparente e nativamente quando encontrar URLs mysql://
+    pymysql.install_as_MySQLdb()
+except Exception:
+    pass
+
 from services.groq_client import load_env_once
 
 load_env_once()
@@ -48,7 +56,7 @@ def _utcnow() -> datetime:
 
 
 def _resolve_database_url() -> tuple[str, bool]:
-    env_url = (os.getenv("DATABASE_URL") or "").strip()
+    env_url = (os.getenv("DATABASE_URL") or "").strip().strip("\"'")
     if not env_url:
         if os.getenv("ENVIRONMENT", "development").lower() == "production":
             raise RuntimeError("DATABASE_URL é obrigatória em ambiente de produção.")
@@ -57,9 +65,12 @@ def _resolve_database_url() -> tuple[str, bool]:
         )
         return "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4", False
 
-    # Converte automaticamente mysql:// (padrão Aiven/TiDB/Railway) para mysql+pymysql://
-    if env_url.startswith("mysql://"):
+    # Converte automaticamente mysql:// ou mysql+mysqldb:// (padrão Aiven/TiDB/Railway) para mysql+pymysql://
+    lower_url = env_url.lower()
+    if lower_url.startswith("mysql://"):
         env_url = "mysql+pymysql://" + env_url[len("mysql://") :]
+    elif lower_url.startswith("mysql+mysqldb://"):
+        env_url = "mysql+pymysql://" + env_url[len("mysql+mysqldb://") :]
 
     # Detecta necessidade de SSL (ex: ?ssl-mode=REQUIRED do Aiven ou ?ssl=true do TiDB Cloud)
     needs_ssl = os.getenv("DB_SSL_REQUIRED", "false").lower() in ("1", "true", "yes")

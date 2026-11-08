@@ -3,21 +3,31 @@ Contratos e Schemas Pydantic v2 — Plataforma Cana.
 """
 
 from datetime import datetime
-from typing import List, Optional
-from pydantic import BaseModel, ConfigDict
+import re
+from typing import List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+AllowedUserRole = Literal[
+    "Administrador",
+    "Responsável Técnico",
+    "Gestor Ambiental",
+    "Operador",
+    "Visualizador",
+]
+AllowedUserStatus = Literal["active", "inactive"]
 
 
 # ==========================================
 # SCHEMAS DE OCORRÊNCIA
 # ==========================================
 class OcorrenciaBase(BaseModel):
-    title_occurrence: str
-    location_occurrence: str
-    responsible_occurrence: str
-    metrics_occurrence: str
-    status_occurrence: str = "analise"
-    risk_occurrence: str = "medio"
-    code_occurrence: Optional[str] = None
+    title_occurrence: str = Field(..., min_length=2, max_length=255)
+    location_occurrence: str = Field(..., min_length=1, max_length=255)
+    responsible_occurrence: str = Field(..., min_length=1, max_length=255)
+    metrics_occurrence: str = Field(..., min_length=1, max_length=255)
+    status_occurrence: str = Field(default="analise", max_length=50)
+    risk_occurrence: str = Field(default="medio", max_length=50)
+    code_occurrence: Optional[str] = Field(default=None, max_length=20)
 
 
 class OcorrenciaCriar(OcorrenciaBase):
@@ -25,12 +35,12 @@ class OcorrenciaCriar(OcorrenciaBase):
 
 
 class OcorrenciaAtualizar(BaseModel):
-    title_occurrence: Optional[str] = None
-    location_occurrence: Optional[str] = None
-    responsible_occurrence: Optional[str] = None
-    metrics_occurrence: Optional[str] = None
-    status_occurrence: Optional[str] = None
-    risk_occurrence: Optional[str] = None
+    title_occurrence: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    location_occurrence: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    responsible_occurrence: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    metrics_occurrence: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    status_occurrence: Optional[str] = Field(default=None, max_length=50)
+    risk_occurrence: Optional[str] = Field(default=None, max_length=50)
 
 
 class OcorrenciaResposta(OcorrenciaBase):
@@ -44,11 +54,19 @@ class OcorrenciaResposta(OcorrenciaBase):
 # SCHEMAS DE USUÁRIO
 # ==========================================
 class UserBase(BaseModel):
-    name_user: str
-    email_user: str
-    role_user: str = "Operador"
-    responsible_point_user: str
-    status_user: str = "active"
+    name_user: str = Field(..., min_length=2, max_length=255)
+    email_user: str = Field(..., min_length=5, max_length=254)
+    role_user: AllowedUserRole = "Operador"
+    responsible_point_user: str = Field(..., min_length=1, max_length=255)
+    status_user: AllowedUserStatus = "active"
+
+    @field_validator("email_user")
+    @classmethod
+    def validate_email_user(cls, v: str) -> str:
+        clean = (v or "").strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean):
+            raise ValueError("Formato de e-mail inválido.")
+        return clean
 
 
 class UserCriar(UserBase):
@@ -56,17 +74,32 @@ class UserCriar(UserBase):
 
 
 class UserAtualizar(BaseModel):
-    name_user: Optional[str] = None
-    email_user: Optional[str] = None
-    role_user: Optional[str] = None
-    responsible_point_user: Optional[str] = None
-    status_user: Optional[str] = None
+    name_user: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    email_user: Optional[str] = Field(default=None, min_length=5, max_length=254)
+    role_user: Optional[AllowedUserRole] = None
+    responsible_point_user: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    status_user: Optional[AllowedUserStatus] = None
+
+    @field_validator("email_user")
+    @classmethod
+    def validate_email_user(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        clean = v.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean):
+            raise ValueError("Formato de e-mail inválido.")
+        return clean
 
 
-class UserResposta(UserBase):
+class UserResposta(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id_user: int
+    name_user: str
+    email_user: str
+    role_user: str
+    responsible_point_user: str
+    status_user: str
     last_access_datetime: Optional[datetime] = None
     datetime_user_creation: Optional[datetime] = None
 
@@ -79,17 +112,17 @@ class TelemetriaToggleRequest(BaseModel):
 
 
 class MapBase(BaseModel):
-    code_map_point: str
-    name_map_point: str
-    grid_coordinate_map_point: Optional[str] = None
-    geo_coordinate_map_point: Optional[str] = None
-    pos_x_map_point: float
-    pos_y_map_point: float
-    ph_map_point: float = 7.2
-    turbidity_map_point: float = 20.0
-    contaminant_map_point: float = 0.6
-    volume_map_point: float = 2800.0
-    risk_map_point: str = "low"
+    code_map_point: str = Field(..., min_length=1, max_length=10)
+    name_map_point: str = Field(..., min_length=1, max_length=255)
+    grid_coordinate_map_point: Optional[str] = Field(default=None, max_length=10)
+    geo_coordinate_map_point: Optional[str] = Field(default=None, max_length=50)
+    pos_x_map_point: float = Field(..., ge=0.0, le=100.0)
+    pos_y_map_point: float = Field(..., ge=0.0, le=100.0)
+    ph_map_point: float = Field(default=7.2, ge=0.0, le=14.0)
+    turbidity_map_point: float = Field(default=20.0, ge=0.0, le=10000.0)
+    contaminant_map_point: float = Field(default=0.6, ge=0.0, le=10000.0)
+    volume_map_point: float = Field(default=2800.0, ge=0.0, le=10000000.0)
+    risk_map_point: str = Field(default="low", max_length=50)
 
 
 class MapCriar(MapBase):
@@ -97,17 +130,17 @@ class MapCriar(MapBase):
 
 
 class MapAtualizar(BaseModel):
-    code_map_point: Optional[str] = None
-    name_map_point: Optional[str] = None
-    grid_coordinate_map_point: Optional[str] = None
-    geo_coordinate_map_point: Optional[str] = None
-    pos_x_map_point: Optional[float] = None
-    pos_y_map_point: Optional[float] = None
-    ph_map_point: Optional[float] = None
-    turbidity_map_point: Optional[float] = None
-    contaminant_map_point: Optional[float] = None
-    volume_map_point: Optional[float] = None
-    risk_map_point: Optional[str] = None
+    code_map_point: Optional[str] = Field(default=None, min_length=1, max_length=10)
+    name_map_point: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    grid_coordinate_map_point: Optional[str] = Field(default=None, max_length=10)
+    geo_coordinate_map_point: Optional[str] = Field(default=None, max_length=50)
+    pos_x_map_point: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    pos_y_map_point: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    ph_map_point: Optional[float] = Field(default=None, ge=0.0, le=14.0)
+    turbidity_map_point: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
+    contaminant_map_point: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
+    volume_map_point: Optional[float] = Field(default=None, ge=0.0, le=10000000.0)
+    risk_map_point: Optional[str] = Field(default=None, max_length=50)
 
 
 class MapResposta(MapBase):
@@ -157,13 +190,13 @@ class HistoryEventResposta(HistoryEventBase):
 # SCHEMAS DE INTELIGÊNCIA ARTIFICIAL (GROQ)
 # ==========================================
 class AISimulationRequest(BaseModel):
-    ph: float
-    turbidity: float
-    volume: float
-    contaminants: float
+    ph: float = Field(..., ge=0.0, le=14.0)
+    turbidity: float = Field(..., ge=0.0, le=10000.0)
+    volume: float = Field(..., ge=0.0, le=10000000.0)
+    contaminants: float = Field(..., ge=0.0, le=10000.0)
     rain: bool = False
-    calculated_score: Optional[int] = None
-    calculated_risk: Optional[str] = None
+    calculated_score: Optional[int] = Field(default=None, ge=0, le=100)
+    calculated_risk: Optional[str] = Field(default=None, max_length=50)
 
 
 class AISimulationResponse(BaseModel):
@@ -230,9 +263,9 @@ class GeneralSettingsUpdate(BaseModel):
 # SCHEMAS DO CICLO HÍDRICO, LAUDOS E LICENCIAMENTO
 # ==========================================
 class WaterSellerCriar(BaseModel):
-    cnpj_seller: Optional[str] = None
-    name_seller: str
-    license_number_seller: Optional[str] = None
+    cnpj_seller: Optional[str] = Field(default=None, max_length=18)
+    name_seller: str = Field(..., min_length=2, max_length=255)
+    license_number_seller: Optional[str] = Field(default=None, max_length=100)
 
 
 class WaterSellerResposta(WaterSellerCriar):
@@ -242,8 +275,8 @@ class WaterSellerResposta(WaterSellerCriar):
 
 
 class PropertyCriar(BaseModel):
-    property_address: str
-    property_city: str
+    property_address: str = Field(..., min_length=2, max_length=255)
+    property_city: str = Field(..., min_length=2, max_length=100)
 
 
 class PropertyResposta(PropertyCriar):
@@ -253,8 +286,8 @@ class PropertyResposta(PropertyCriar):
 
 
 class EnvironmentalRegulatorCriar(BaseModel):
-    name_regulator: str
-    jurisdiction_regulator: str
+    name_regulator: str = Field(..., min_length=2, max_length=255)
+    jurisdiction_regulator: str = Field(..., min_length=2, max_length=255)
 
 
 class EnvironmentalRegulatorResposta(EnvironmentalRegulatorCriar):
@@ -264,13 +297,13 @@ class EnvironmentalRegulatorResposta(EnvironmentalRegulatorCriar):
 
 
 class MeasurementCriar(BaseModel):
-    ph_measurement: float = 7.0
-    o2_dissolved_measurement: float = 6.0
-    turbidity_measurement: float = 20.0
-    conductivity_measurement: float = 350.0
-    bod_measurement: float = 15.0
-    cod_measurement: float = 45.0
-    nitrogen_phosphorus_measurement: float = 8.0
+    ph_measurement: float = Field(default=7.0, ge=0.0, le=14.0)
+    o2_dissolved_measurement: float = Field(default=6.0, ge=0.0, le=100.0)
+    turbidity_measurement: float = Field(default=20.0, ge=0.0, le=10000.0)
+    conductivity_measurement: float = Field(default=350.0, ge=0.0, le=100000.0)
+    bod_measurement: float = Field(default=15.0, ge=0.0, le=100000.0)
+    cod_measurement: float = Field(default=45.0, ge=0.0, le=100000.0)
+    nitrogen_phosphorus_measurement: float = Field(default=8.0, ge=0.0, le=100000.0)
     datetime_measurement: Optional[datetime] = None
 
 
@@ -343,7 +376,7 @@ class AreaOfDisposalResposta(BaseModel):
 
 class WaterAdmissionCriar(BaseModel):
     id_batch: int
-    volume_admitted: float
+    volume_admitted: float = Field(..., ge=0.0, le=10000000.0)
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 
@@ -361,7 +394,7 @@ class WaterAdmissionResposta(BaseModel):
 
 class WaterStorageCriar(BaseModel):
     id_property: int
-    volume_stored: float
+    volume_stored: float = Field(..., ge=0.0, le=10000000.0)
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 
@@ -379,7 +412,7 @@ class WaterStorageResposta(BaseModel):
 
 class WaterDisposalCriar(BaseModel):
     id_disposal_area: int
-    volume_disposed: float
+    volume_disposed: float = Field(..., ge=0.0, le=10000000.0)
     id_measurement: Optional[int] = None
     measurement: Optional[MeasurementCriar] = None
 

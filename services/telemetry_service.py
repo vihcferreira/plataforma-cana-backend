@@ -64,6 +64,16 @@ def _aplicar_pico_anomalo(ponto: MapPointModel, indices: List[int]) -> None:
             ponto.contaminant_map_point = 3.6
 
 
+def _mask_email(email_str: str | None) -> str:
+    """Mascara endereço de e-mail para conformidade LGPD em logs de aplicação (Art. 46)."""
+    if not email_str or "@" not in str(email_str):
+        return "***"
+    local, domain = str(email_str).strip().split("@", 1)
+    if len(local) <= 2:
+        return f"{local[0]}***@{domain}"
+    return f"{local[0]}***{local[-1]}@{domain}"
+
+
 def _processar_ponto_do_tenant(
     db: Session,
     tenant_id: str,
@@ -160,7 +170,8 @@ def _processar_ponto_do_tenant(
 
         if tenant_cfg and tenant_cfg.get("email_alerts") and tenant_cfg.get("user_email"):
             logger.info(
-                f"[Email Alert][Tenant {tenant_id[:8]}] Alerta Crítico {novo_alerta.code_alert} ({ponto.name_map_point}) disparado para: {tenant_cfg.get('user_email')}"
+                f"[Email Alert][Tenant {tenant_id[:8]}] Alerta Crítico {novo_alerta.code_alert} "
+                f"({ponto.name_map_point}) disparado para: {_mask_email(tenant_cfg.get('user_email'))}"
             )
 
 

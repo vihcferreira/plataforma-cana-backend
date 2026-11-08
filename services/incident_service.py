@@ -9,7 +9,7 @@ Unifica:
 
 from datetime import datetime
 import json
-import random
+import secrets
 from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 
@@ -25,9 +25,10 @@ from services.water_quality_service import utcnow
 
 
 def gerar_codigo_ocorrencia_unico(db: Session, tenant_id: str) -> str:
-    """Gera um código OCR único dentro do escopo do tenant."""
+    """Gera um código OCR único dentro do escopo do tenant usando CSPRNG (secrets) e limite de tentativas."""
     for _ in range(25):
-        candidato = f"OCR-{random.randint(1000, 9999)}"
+        numero = 1000 + secrets.randbelow(9000)
+        candidato = f"OCR-{numero}"
         existe = (
             db.query(OccurrenceModel.id_occurrence)
             .filter(
@@ -39,8 +40,9 @@ def gerar_codigo_ocorrencia_unico(db: Session, tenant_id: str) -> str:
         if not existe:
             return candidato
 
-    while True:
-        candidato = f"OCR-{random.randint(10000, 999999)}"
+    for _ in range(100):
+        numero = 10000 + secrets.randbelow(990000)
+        candidato = f"OCR-{numero}"
         existe = (
             db.query(OccurrenceModel.id_occurrence)
             .filter(
@@ -51,12 +53,15 @@ def gerar_codigo_ocorrencia_unico(db: Session, tenant_id: str) -> str:
         )
         if not existe:
             return candidato
+
+    return f"OCR-{secrets.token_hex(4).upper()}"
 
 
 def gerar_codigo_alerta_unico(db: Session, tenant_id: str) -> str:
-    """Gera um código AL único dentro do escopo do tenant (evita IntegrityError após centenas de ciclos)."""
+    """Gera um código AL único dentro do escopo do tenant usando CSPRNG (secrets) e sem loop infinito."""
     for _ in range(25):
-        candidato = f"AL-{random.randint(100, 999)}"
+        numero = 100 + secrets.randbelow(900)
+        candidato = f"AL-{numero}"
         existe = (
             db.query(AlertModel.id_alert)
             .filter(
@@ -68,8 +73,9 @@ def gerar_codigo_alerta_unico(db: Session, tenant_id: str) -> str:
         if not existe:
             return candidato
 
-    while True:
-        candidato = f"AL-{random.randint(1000, 999999)}"
+    for _ in range(100):
+        numero = 1000 + secrets.randbelow(999000)
+        candidato = f"AL-{numero}"
         existe = (
             db.query(AlertModel.id_alert)
             .filter(
@@ -80,6 +86,8 @@ def gerar_codigo_alerta_unico(db: Session, tenant_id: str) -> str:
         )
         if not existe:
             return candidato
+
+    return f"AL-{secrets.token_hex(4).upper()}"
 
 
 def obter_responsavel_tenant(

@@ -12,7 +12,7 @@ import os
 import re
 import threading
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -50,6 +50,8 @@ class TenantContext:
     tenant_id: str
     email: Optional[str] = None
     name: Optional[str] = None
+    email_verified: bool = False
+    role: str = "Administrador"
 
 
 def _get_certs_client() -> httpx.Client:
@@ -217,10 +219,24 @@ def verify_firebase_id_token(token: str, project_id: str = FIREBASE_PROJECT_ID) 
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    email_verified = bool(payload.get("email_verified", False))
+    require_verified = os.getenv("REQUIRE_EMAIL_VERIFIED", "false").lower() in ("1", "true", "yes")
+    if require_verified and not email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verificação de e-mail obrigatória para acessar este recurso.",
+        )
+
+    raw_email = payload.get("email")
+    clean_email = str(raw_email).strip().lower() if raw_email else None
+    custom_role = str(payload.get("role") or "Administrador").strip()
+
     return TenantContext(
         tenant_id=sub.strip(),
-        email=payload.get("email"),
+        email=clean_email,
         name=payload.get("name"),
+        email_verified=email_verified,
+        role=custom_role,
     )
 
 
@@ -242,3 +258,20 @@ def get_current_tenant(
 ) -> str:
     """Dependência FastAPI que retorna diretamente o tenant_id (uid do usuário autenticado)."""
     return context.tenant_id
+
+
+def require_roles(*allowed_roles: str) -> Callable:
+    """Dependência FastAPI para impor Controle de Acesso Baseado em Papéis (RBAC)."""
+    allowed_set = {r.strip() for r in allowed_roles if r.strip()}
+
+    def _role_checker(
+        context: TenantContext = Depends(get_current_tenant_context),
+    ) -> TenantContext:
+        if allowed_set and context.role not in allowed_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Acesso negado. Perfil necessário: {', '.join(sorted(allowed_set))}.",
+            )
+        return context
+
+    return _role_checker

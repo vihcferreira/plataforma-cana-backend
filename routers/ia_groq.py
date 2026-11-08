@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime, time, timedelta
 import json
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -32,6 +33,22 @@ from services.water_quality_service import sao_paulo_now
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Inteligência Artificial (Groq)"])
+
+
+def _sanitize_for_llm(value: str | None, max_len: int = 160) -> str:
+    """
+    Sanitiza strings de banco antes de enviá-las à API externa da Groq:
+    - Mitiga Indirect Prompt Injection removendo quebras de linha e tags.
+    - Garante conformidade LGPD (Art. 33) mascarando e-mails e nomes de colaboradores.
+    """
+    if not value:
+        return ""
+    cleaned = re.sub(r"[\r\n\t]+", " ", str(value))
+    cleaned = re.sub(r"[<>]", "", cleaned)
+    cleaned = re.sub(r"[\w\.-]+@[\w\.-]+\.\w+", "[EMAIL_PROTEGIDO]", cleaned)
+    cleaned = re.sub(r"criada por [^:]+:", "criada por [OPERADOR]:", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"por [A-Za-zÀ-ÿ\s]{2,40}\.", "por [OPERADOR].", cleaned)
+    return cleaned[:max_len].strip()
 
 
 def executar_e_persistir_analise_diaria(
@@ -80,7 +97,10 @@ def executar_e_persistir_analise_diaria(
             .all()
         )
         dados_contexto["ocorrencias_ativas"] = [
-            f"{o.code_occurrence or 'OCR'}: {o.title_occurrence} ({o.location_occurrence}, risco {o.risk_occurrence}, status {o.status_occurrence})"
+            f"{_sanitize_for_llm(o.code_occurrence or 'OCR', 20)}: "
+            f"{_sanitize_for_llm(o.title_occurrence, 100)} "
+            f"({_sanitize_for_llm(o.location_occurrence, 80)}, risco {_sanitize_for_llm(o.risk_occurrence, 20)}, "
+            f"status {_sanitize_for_llm(o.status_occurrence, 20)})"
             for o in ocorrencias
         ]
 
@@ -91,7 +111,7 @@ def executar_e_persistir_analise_diaria(
         )
         dados_contexto["total_pontos"] = len(pontos)
         dados_contexto["pontos_criticos"] = [
-            f"{p.name_map_point} (pH {p.ph_map_point}, Turbidez {p.turbidity_map_point} NTU, Risco {p.risk_map_point})"
+            f"{_sanitize_for_llm(p.name_map_point, 80)} (pH {p.ph_map_point}, Turbidez {p.turbidity_map_point} NTU, Risco {_sanitize_for_llm(p.risk_map_point, 20)})"
             for p in pontos
             if p.risk_map_point in ("critical", "medium")
         ]
@@ -104,7 +124,7 @@ def executar_e_persistir_analise_diaria(
             .all()
         )
         dados_contexto["ultimos_eventos"] = [
-            f"[{e.event_type.upper()}] {e.event_point}: {e.event_description}"
+            f"[{_sanitize_for_llm(e.event_type, 20).upper()}] {_sanitize_for_llm(e.event_point, 80)}: {_sanitize_for_llm(e.event_description, 160)}"
             for e in eventos
         ]
 
@@ -292,12 +312,16 @@ Retorne um JSON estrito com esta estrutura:
             model_used=model,
         )
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except Exception as exc:
-        logger.error(f"Erro ao processar simulação na IA: {exc}")
+        logger.warning(f"Erro de validação na simulação IA (tenant {tenant_id[:8]}): {ve}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falha na comunicação com o Groq: {str(exc)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Parâmetros inválidos ou serviço de IA não configurado.",
+        )
+    except Exception as exc:
+        logger.error(f"Erro ao processar simulação na IA (tenant {tenant_id[:8]}): {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Serviço de inteligência artificial temporariamente indisponível. Tente novamente em instantes.",
         )
 
 
@@ -315,10 +339,14 @@ def obter_analise_diaria(
         )
         return AIDailyAnalysisResponse(**resultado)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except Exception as exc:
-        logger.error(f"Erro ao processar análise diária no Groq: {exc}")
+        logger.warning(f"Erro de validação na análise diária IA (tenant {tenant_id[:8]}): {ve}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falha na comunicação com o Groq: {str(exc)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Parâmetros inválidos ou serviço de IA não configurado.",
+        )
+    except Exception as exc:
+        logger.error(f"Erro ao processar análise diária no Groq (tenant {tenant_id[:8]}): {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Serviço de inteligência artificial temporariamente indisponível. Tente novamente em instantes.",
         )

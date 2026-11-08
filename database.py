@@ -5,12 +5,14 @@ Configuração SQLAlchemy, Modelos ORM Multitenant e Migração Otimizada em Lot
 from datetime import datetime, timezone
 import logging
 import os
+import re
 
 from sqlalchemy import (
     Boolean,
     Column,
     Date,
     DateTime,
+     DDL,
     Enum,
     Float,
     ForeignKey,
@@ -31,13 +33,33 @@ load_env_once()
 
 logger = logging.getLogger(__name__)
 
+_SAFE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _validate_sql_identifier(identifier: str) -> str:
+    """Valida estritamente identificadores SQL (tabelas, colunas, índices) contra injeção em DDL."""
+    if not isinstance(identifier, str) or not _SAFE_SQL_IDENTIFIER.match(identifier):
+        raise ValueError(f"Identificador SQL inválido ou potencialmente inseguro: {identifier!r}")
+    return identifier
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-DEFAULT_DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+def _resolve_database_url() -> str:
+    env_url = (os.getenv("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        raise RuntimeError("DATABASE_URL é obrigatória em ambiente de produção.")
+    logger.warning(
+        "[Security] DATABASE_URL ausente no ambiente; utilizando conexão local de desenvolvimento."
+    )
+    return "mysql+pymysql://user:password@localhost:3306/water_management?charset=utf8mb4"
+
+
+DATABASE_URL = _resolve_database_url()
 
 engine = create_engine(
     DATABASE_URL,
@@ -344,12 +366,13 @@ def _migrate_multitenancy_schema(conn) -> None:
             pass
 
     for tbl in tenant_tables:
-        if (tbl, "tenant_id") not in existing_cols:
+        safe_tbl = _validate_sql_identifier(tbl)
+        if (safe_tbl, "tenant_id") not in existing_cols:
             conn.execute(
-                text(f"ALTER TABLE `{tbl}` ADD COLUMN `tenant_id` VARCHAR(128) NOT NULL DEFAULT '__legacy__'")
+                DDL(f"ALTER TABLE `{safe_tbl}` ADD COLUMN `tenant_id` VARCHAR(128) NOT NULL DEFAULT '__legacy__'")
             )
             conn.commit()
-            logger.info(f"[Multitenancy Migration] Coluna tenant_id adicionada em {tbl}.")
+            logger.info(f"[Multitenancy Migration] Coluna tenant_id adicionada em {safe_tbl}.")
 
     stats_stmt = text(
         "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "
@@ -359,9 +382,10 @@ def _migrate_multitenancy_schema(conn) -> None:
 
     indexed_tenant_tables = {r[0] for r in stat_rows if r[3] == "tenant_id"}
     for tbl in tenant_tables:
-        if tbl not in indexed_tenant_tables:
+        safe_tbl = _validate_sql_identifier(tbl)
+        if safe_tbl not in indexed_tenant_tables:
             try:
-                conn.execute(text(f"CREATE INDEX `idx_{tbl}_tenant_id` ON `{tbl}` (`tenant_id`)"))
+                conn.execute(DDL(f"CREATE INDEX `idx_{safe_tbl}_tenant_id` ON `{safe_tbl}` (`tenant_id`)"))
                 conn.commit()
             except Exception:
                 pass
@@ -380,24 +404,28 @@ def _migrate_multitenancy_schema(conn) -> None:
             unique_indexes_by_table.setdefault(tbl_name, {}).setdefault(idx_name, set()).add(col_name)
 
     for tbl, col_name, uq_name in composite_uniques:
-        indexes_by_name = unique_indexes_by_table.get(tbl, {})
+        safe_tbl = _validate_sql_identifier(tbl)
+        safe_col = _validate_sql_identifier(col_name)
+        safe_uq = _validate_sql_identifier(uq_name)
+        indexes_by_name = unique_indexes_by_table.get(safe_tbl, {})
         for idx_name, cols in indexes_by_name.items():
-            if col_name in cols and "tenant_id" not in cols:
+            if safe_col in cols and "tenant_id" not in cols:
                 try:
-                    conn.execute(text(f"ALTER TABLE `{tbl}` DROP INDEX `{idx_name}`"))
+                    safe_idx = _validate_sql_identifier(str(idx_name))
+                    conn.execute(DDL(f"ALTER TABLE `{safe_tbl}` DROP INDEX `{safe_idx}`"))
                     conn.commit()
                 except Exception as drop_err:
-                    logger.warning(f"[Multitenancy Migration] Aviso ao remover índice {idx_name} de {tbl}: {drop_err}")
+                    logger.warning(f"[Multitenancy Migration] Aviso ao remover índice {idx_name} de {safe_tbl}: {drop_err}")
 
-        has_composite = any(cols == {"tenant_id", col_name} for cols in indexes_by_name.values())
+        has_composite = any(cols == {"tenant_id", safe_col} for cols in indexes_by_name.values())
         if not has_composite:
             try:
                 conn.execute(
-                    text(f"ALTER TABLE `{tbl}` ADD CONSTRAINT `{uq_name}` UNIQUE (`tenant_id`, `{col_name}`)")
+                    DDL(f"ALTER TABLE `{safe_tbl}` ADD CONSTRAINT `{safe_uq}` UNIQUE (`tenant_id`, `{safe_col}`)")
                 )
                 conn.commit()
             except Exception as uq_err:
-                logger.warning(f"[Multitenancy Migration] Aviso ao criar constraint {uq_name} em {tbl}: {uq_err}")
+                logger.warning(f"[Multitenancy Migration] Aviso ao criar constraint {safe_uq} em {safe_tbl}: {uq_err}")
 
 
 def init_db() -> None:

@@ -159,18 +159,40 @@ def calculate_point_risk(ph: float, turbidity: float, volume: float, contaminant
 # ==========================================
 # 3. CARREGAMENTO E INFERÊNCIA EM LOTE DO MODELO ML + CONAMA 430
 # ==========================================
+import hashlib
+
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "IA", "modelo_qualidade_agua.pkl")
+_DEFAULT_MODEL_SHA256 = "b679da26860f04e701b219b1c858f77640ffcf8b02eb15f8019aca7a8aacbb9c"
+
+
+def _verify_model_integrity(path: str) -> bool:
+    """Valida o hash SHA-256 do artefato .pkl antes de deserializar com joblib/pickle (OWASP A08)."""
+    expected_hash = (os.getenv("WATER_QUALITY_MODEL_SHA256") or _DEFAULT_MODEL_SHA256).strip().lower()
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hasher.update(chunk)
+    actual_hash = hasher.hexdigest().lower()
+    if actual_hash != expected_hash:
+        logger.error(
+            f"[Security][ML] Falha na verificação de integridade SHA-256 de {path}. "
+            "Carregamento bloqueado para prevenir deserialização insegura."
+        )
+        return False
+    return True
 
 
 def _load_ml_model() -> Any:
     if not os.path.exists(_MODEL_PATH):
         logger.warning(f"[ML] Arquivo de modelo não encontrado em {_MODEL_PATH}. Usando fallback CONAMA 430.")
         return None
+    if not _verify_model_integrity(_MODEL_PATH):
+        return None
     try:
         import joblib
 
         model = joblib.load(_MODEL_PATH)
-        logger.info("[ML] Modelo supervisionado modelo_qualidade_agua.pkl carregado com sucesso.")
+        logger.info("[ML] Modelo supervisionado modelo_qualidade_agua.pkl verificado (SHA-256) e carregado com sucesso.")
         return model
     except Exception as exc:
         logger.warning(f"[ML] Não foi possível carregar modelo em {_MODEL_PATH} (usando fallback CONAMA 430): {exc}")

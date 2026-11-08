@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from auth_tenant import get_current_tenant
+from auth_tenant import TenantContext, get_current_tenant, get_current_tenant_context
 from database import OccurrenceModel, get_db
 from schemas import OcorrenciaAtualizar, OcorrenciaCriar, OcorrenciaResposta
 from services.incident_service import gerar_codigo_ocorrencia_unico, registrar_evento_historico
@@ -18,6 +18,13 @@ def _mapear_severidade_historico(risco: str) -> str:
     if r.startswith("med"):
         return "medio"
     return "normal"
+
+
+def _resolve_authenticated_author(ctx: TenantContext, responsible_fallback: str) -> str:
+    actor = ctx.email or f"uid:{ctx.tenant_id[:8]}"
+    if responsible_fallback and responsible_fallback != actor:
+        return f"{responsible_fallback} (autenticado: {actor})"
+    return actor
 
 
 @router.get("/", response_model=List[OcorrenciaResposta], summary="Listar todas as ocorrências do usuário")
@@ -36,9 +43,10 @@ def listar_ocorrencias(
 @router.post("/", response_model=OcorrenciaResposta, status_code=status.HTTP_201_CREATED, summary="Criar nova ocorrência")
 def criar_ocorrencia(
     dados: OcorrenciaCriar,
-    tenant_id: str = Depends(get_current_tenant),
+    ctx: TenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
 ):
+    tenant_id = ctx.tenant_id
     codigo = dados.code_occurrence or gerar_codigo_ocorrencia_unico(db, tenant_id)
 
     nova_ocorrencia = OccurrenceModel(
@@ -68,7 +76,7 @@ def criar_ocorrencia(
         event_severity=_mapear_severidade_historico(nova_ocorrencia.risk_occurrence),
         id_reference=nova_ocorrencia.id_occurrence,
         reference_type="occurrence",
-        created_by=nova_ocorrencia.responsible_occurrence,
+        created_by=_resolve_authenticated_author(ctx, nova_ocorrencia.responsible_occurrence),
     )
 
     db.commit()
@@ -80,9 +88,10 @@ def criar_ocorrencia(
 def atualizar_ocorrencia(
     id_occurrence: int,
     dados: OcorrenciaAtualizar,
-    tenant_id: str = Depends(get_current_tenant),
+    ctx: TenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
 ):
+    tenant_id = ctx.tenant_id
     ocorrencia = (
         db.query(OccurrenceModel)
         .filter(
@@ -111,7 +120,7 @@ def atualizar_ocorrencia(
         event_severity="normal" if eh_encerrada else _mapear_severidade_historico(ocorrencia.risk_occurrence),
         id_reference=ocorrencia.id_occurrence,
         reference_type="occurrence",
-        created_by=ocorrencia.responsible_occurrence,
+        created_by=_resolve_authenticated_author(ctx, ocorrencia.responsible_occurrence),
     )
 
     db.commit()

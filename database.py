@@ -74,9 +74,17 @@ def _resolve_database_url() -> tuple[str, bool]:
 
     # Detecta necessidade de SSL (ex: ?ssl-mode=REQUIRED do Aiven ou ?ssl=true do TiDB Cloud)
     needs_ssl = os.getenv("DB_SSL_REQUIRED", "false").lower() in ("1", "true", "yes")
-    if "ssl-mode=" in env_url or "ssl_mode=" in env_url or "ssl=true" in env_url:
+    if any(k in env_url for k in ("ssl-mode", "ssl_mode", "ssl=", "ssl_ca")):
         needs_ssl = True
-        env_url = re.sub(r"([?&])(ssl-mode|ssl_mode|ssl)=[^&]*&?", r"\1", env_url).rstrip("?&")
+        try:
+            import urllib.parse as up
+
+            parsed = up.urlparse(env_url)
+            qs = up.parse_qsl(parsed.query)
+            clean_qs = [(k, v) for k, v in qs if k not in ("ssl_mode", "ssl-mode", "ssl", "ssl_ca")]
+            env_url = up.urlunparse(parsed._replace(query=up.urlencode(clean_qs)))
+        except Exception:
+            env_url = re.sub(r"([?&])(ssl-mode|ssl_mode|ssl|ssl_ca)=[^&]*&?", r"\1", env_url).rstrip("?&")
 
     return env_url, needs_ssl
 
